@@ -15,3 +15,6 @@
 ## Tech Stack
 - Go script
 - Claude / Open AI API for LLM Calls
+
+## CRON to run this every 4 hours
+0 */4 * * * cd /Users/apple/engg/products/tech-news && /usr/local/go/bin/go run . >> /tmp/tech-news.log 2>&1
