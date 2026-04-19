@@ -32,16 +32,40 @@ security add-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w "your-api-key
 security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w
 ```
 
-## CRON to run this every 4 hours
+## Runner script
 
-```
-0 */4 * * * export ANTHROPIC_API_KEY=$(security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w) && cd /Users/apple/engg/products/tech-news && /usr/local/go/bin/go run . >> /tmp/tech-news.log 2>&1
-```
+`tech-news-run.sh` fetches the key from keychain and runs the Go program. Make it executable:
 
-**Add it (one-shot):**
 ```bash
-(crontab -l 2>/dev/null; echo '0 */4 * * * export ANTHROPIC_API_KEY=$(security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w) && cd /Users/apple/engg/products/tech-news && $(which go) run . >> /tmp/tech-news.log 2>&1') | crontab -
+chmod +x tech-news-run.sh
 ```
+
+## Scheduling with launchd (every 4 hours)
+
+Cron on macOS can't access the login keychain, so we use `launchd` instead.
+
+**Install:**
+```bash
+sed "s|REPO_PATH|$(pwd)|g" com.technews.plist > ~/Library/LaunchAgents/com.technews.plist
+launchctl load ~/Library/LaunchAgents/com.technews.plist
+```
+
+**Verify it's loaded:**
+```bash
+launchctl list | grep technews
+```
+
+**Check logs:**
+```bash
+tail -f /tmp/tech-news.log
+```
+
+**Uninstall:**
+```bash
+launchctl unload ~/Library/LaunchAgents/com.technews.plist
+rm ~/Library/LaunchAgents/com.technews.plist
+```
+
 
 ## Next steps
 - tests

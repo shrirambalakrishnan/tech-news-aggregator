@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.technews</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>REPO_PATH/tech-news-run.sh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>14400</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/tech-news.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/tech-news.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
