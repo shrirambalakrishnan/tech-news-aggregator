@@ -11,10 +11,16 @@ const (
 	HACKERNEWS_API_HOST              = "http://hn.algolia.com/api/"
 	HACKERNEWS_API_VERSION           = "v1"
 	HACKERNEWS_STORIES_LIST_ENDPOINT = "search?"
-	HACKERNEWS_HITS_PER_PAGE         = 30
-	HACKERNEWS_NUM_PAGES_TO_QUERY    = 1
 	HACKERNEWS_STORIES_LIST_URL      = HACKERNEWS_API_HOST + HACKERNEWS_API_VERSION + "/" + HACKERNEWS_STORIES_LIST_ENDPOINT
 )
+
+var HACKERNEWS_HITS_PER_PAGE = 30
+var HACKERNEWS_NUM_PAGES_TO_QUERY = 1
+
+var getHackerNewsStoriesInPage = GetHackerNewsStoriesInPage
+var filterHackerNewsStoriesByTitle = FilterHackerNewsStoriesByTitle
+var classifyTechNewsStory = ClassifyTechNewsStory
+var getHackerNewsStories = GetHackerNewsStories
 
 type HackerNewsStory struct {
 	Author    string `json:"author"`
@@ -41,7 +47,7 @@ func GetHackerNewsStories() []HackerNewsStory {
 	for page := 0; page < HACKERNEWS_NUM_PAGES_TO_QUERY; page++ {
 		log.Println("GetHackerNewsStories fetching page = ", page)
 
-		pageStories := GetHackerNewsStoriesInPage(page)
+		pageStories := getHackerNewsStoriesInPage(page)
 		stories = append(stories, pageStories...)
 	}
 
@@ -83,7 +89,7 @@ func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory
 	}
 	filteredStories := []HackerNewsStory{}
 
-	filteredStoryIds := ClassifyTechNewsStory(storiesWithTitle)
+	filteredStoryIds := classifyTechNewsStory(storiesWithTitle)
 	log.Println("filteredStoryIds = ", filteredStoryIds)
 
 	for _, story := range stories {
@@ -100,10 +106,10 @@ func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory
 func GetMyHackerNewsStories() []HackerNewsStory {
 	log.Println("GetMyHackerNewsStories...")
 
-	stories := GetHackerNewsStories()
+	stories := getHackerNewsStories()
 	log.Println("stories = ", stories)
 
-	filteredStories := FilterHackerNewsStoriesByTitle(stories)
+	filteredStories := filterHackerNewsStoriesByTitle(stories)
 	log.Println("filteredStories = ", filteredStories)
 
 	return filteredStories

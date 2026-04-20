@@ -21,7 +21,11 @@ type StoryDetail struct {
 	Title string
 }
 
-func constructPromptSystemAttribute() string {
+var constructPromptSystemAttribute = ConstructPromptSystemAttribute
+var constructPromptMessageAttribute = ConstructPromptMessageAttribute
+var claudeMessageApiCall = ClaudeMessageApiCall
+
+func ConstructPromptSystemAttribute() string {
 	return `You are a Hacker News story classifier.
 
 	Classify stories as "technical computer science" if they are about:
@@ -47,7 +51,7 @@ func constructPromptSystemAttribute() string {
 	`
 }
 
-func constructPromptMessageAttribute(stories []StoryDetail) string {
+func ConstructPromptMessageAttribute(stories []StoryDetail) string {
 	prompt := ""
 
 	for i := 0; i < len(stories); i++ {
@@ -95,7 +99,7 @@ func ClassifyTechNewsStory(stories []StoryDetail) []int {
 
 	var classificationResponse ClassificationResponse
 
-	err := ClaudeMessageApiCall(classificationPrompt, &classificationResponse)
+	err := claudeMessageApiCall(classificationPrompt, &classificationResponse)
 	if err != nil {
 		log.Println("Error calling Claude API:", err)
 		return []int{}
@@ -103,7 +107,11 @@ func ClassifyTechNewsStory(stories []StoryDetail) []int {
 
 	log.Println("Classification Response:", classificationResponse)
 
-	// from the response body extract content.text field
+	if len(classificationResponse.Content) == 0 {
+		log.Println("Empty content in classification response")
+		return []int{}
+	}
+
 	techNewsStoryIdsStr := classificationResponse.Content[0].Text
 	log.Println("techNewsStoryIdsStr = ", techNewsStoryIdsStr)
 
@@ -117,9 +125,10 @@ func ClassifyTechNewsStory(stories []StoryDetail) []int {
 
 	log.Println("techNewsStoryIds = ", techNewsStoryIds)
 	return techNewsStoryIds
+
 }
 
-func ClaudeMessageApiCall(prompt PromptInput, classificationResponse any) error {
+func ClaudeMessageApiCall(prompt PromptInput, classificationResponse *ClassificationResponse) error {
 
 	message := Message{
 		Role:    "user",
