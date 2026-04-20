@@ -18,6 +18,9 @@ var HACKERNEWS_HITS_PER_PAGE = 30
 var HACKERNEWS_NUM_PAGES_TO_QUERY = 1
 
 var getHackerNewsStoriesInPage = GetHackerNewsStoriesInPage
+var filterHackerNewsStoriesByTitle = FilterHackerNewsStoriesByTitle
+var classifyTechNewsStory = ClassifyTechNewsStory
+var getHackerNewsStories = GetHackerNewsStories
 
 type HackerNewsStory struct {
 	Author    string `json:"author"`
@@ -86,7 +89,7 @@ func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory
 	}
 	filteredStories := []HackerNewsStory{}
 
-	filteredStoryIds := ClassifyTechNewsStory(storiesWithTitle)
+	filteredStoryIds := classifyTechNewsStory(storiesWithTitle)
 	log.Println("filteredStoryIds = ", filteredStoryIds)
 
 	for _, story := range stories {
@@ -103,10 +106,10 @@ func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory
 func GetMyHackerNewsStories() []HackerNewsStory {
 	log.Println("GetMyHackerNewsStories...")
 
-	stories := GetHackerNewsStories()
+	stories := getHackerNewsStories()
 	log.Println("stories = ", stories)
 
-	filteredStories := FilterHackerNewsStoriesByTitle(stories)
+	filteredStories := filterHackerNewsStoriesByTitle(stories)
 	log.Println("filteredStories = ", filteredStories)
 
 	return filteredStories
