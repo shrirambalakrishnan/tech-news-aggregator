@@ -1,6 +1,10 @@
-package main
+package hackernews_classifier
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/shrirambalakrishnan/tech-news/claudeapi"
+)
 
 func TestConstructPromptSystemAttribute(t *testing.T) {
 
@@ -25,8 +29,8 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 	- Career advice, hiring, workplace culture
 	- Historical or cultural stories even if tech-adjacent
 
-	Return ONLY a JSON array of story IDs that are technical. 
-	No explanation, no markdown fences, no wrapping. 
+	Return ONLY a JSON array of story IDs that are technical.
+	No explanation, no markdown fences, no wrapping.
 	Example response: [123, 456, 789]
 	`
 
@@ -74,11 +78,11 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		constructPromptMessageAttribute = func(stories []StoryDetail) string { return "message prompt" }
 		defer func() { constructPromptMessageAttribute = ConstructPromptMessageAttribute }()
 
-		claudeMessageApiCall = func(prompt PromptInput, classificationResponse *ClassificationResponse) error {
-			classificationResponse.Content = []ResponseContent{{Type: "text", Text: "[]"}}
+		claudeMessageApiCall = func(prompt claudeapi.PromptInput, response *claudeapi.Response) error {
+			response.Content = []claudeapi.ResponseContent{{Type: "text", Text: "[]"}}
 			return nil
 		}
-		defer func() { claudeMessageApiCall = ClaudeMessageApiCall }()
+		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
 		ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}})
 
@@ -98,11 +102,11 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		}
 		defer func() { constructPromptMessageAttribute = ConstructPromptMessageAttribute }()
 
-		claudeMessageApiCall = func(prompt PromptInput, classificationResponse *ClassificationResponse) error {
-			classificationResponse.Content = []ResponseContent{{Type: "text", Text: "[]"}}
+		claudeMessageApiCall = func(prompt claudeapi.PromptInput, response *claudeapi.Response) error {
+			response.Content = []claudeapi.ResponseContent{{Type: "text", Text: "[]"}}
 			return nil
 		}
-		defer func() { claudeMessageApiCall = ClaudeMessageApiCall }()
+		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
 		input := []StoryDetail{{Id: 1, Title: "Story1"}, {Id: 2, Title: "Story2"}, {Id: 3, Title: "Story3"}, {Id: 10, Title: "Story10"}}
 		ClassifyTechNewsStory(input)
@@ -119,17 +123,17 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		constructPromptMessageAttribute = func(stories []StoryDetail) string { return "message prompt" }
 		defer func() { constructPromptMessageAttribute = ConstructPromptMessageAttribute }()
 
-		var calledWith PromptInput
-		claudeMessageApiCall = func(prompt PromptInput, classificationResponse *ClassificationResponse) error {
+		var calledWith claudeapi.PromptInput
+		claudeMessageApiCall = func(prompt claudeapi.PromptInput, response *claudeapi.Response) error {
 			calledWith = prompt
-			classificationResponse.Content = []ResponseContent{{Type: "text", Text: "[]"}}
+			response.Content = []claudeapi.ResponseContent{{Type: "text", Text: "[]"}}
 			return nil
 		}
-		defer func() { claudeMessageApiCall = ClaudeMessageApiCall }()
+		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
 		ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}})
 
-		expected := PromptInput{System: "system prompt", Message: "message prompt"}
+		expected := claudeapi.PromptInput{System: "system prompt", Message: "message prompt"}
 		if calledWith != expected {
 			t.Fatalf("expected claudeMessageApiCall called with %v, got %v", expected, calledWith)
 		}
@@ -142,11 +146,11 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		constructPromptMessageAttribute = func(stories []StoryDetail) string { return "message prompt" }
 		defer func() { constructPromptMessageAttribute = ConstructPromptMessageAttribute }()
 
-		claudeMessageApiCall = func(prompt PromptInput, classificationResponse *ClassificationResponse) error {
-			classificationResponse.Content = []ResponseContent{{Type: "text", Text: "[1,3]"}}
+		claudeMessageApiCall = func(prompt claudeapi.PromptInput, response *claudeapi.Response) error {
+			response.Content = []claudeapi.ResponseContent{{Type: "text", Text: "[1,3]"}}
 			return nil
 		}
-		defer func() { claudeMessageApiCall = ClaudeMessageApiCall }()
+		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
 		result := ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}, {Id: 2, Title: "Story2"}, {Id: 3, Title: "Story3"}})
 
@@ -156,11 +160,11 @@ func TestClassifyTechNewsStory(t *testing.T) {
 	})
 
 	t.Run("returns empty slice when Claude returns empty content", func(t *testing.T) {
-		claudeMessageApiCall = func(prompt PromptInput, classificationResponse *ClassificationResponse) error {
-			classificationResponse.Content = []ResponseContent{}
+		claudeMessageApiCall = func(prompt claudeapi.PromptInput, response *claudeapi.Response) error {
+			response.Content = []claudeapi.ResponseContent{}
 			return nil
 		}
-		defer func() { claudeMessageApiCall = ClaudeMessageApiCall }()
+		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
 		result := ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}})
 

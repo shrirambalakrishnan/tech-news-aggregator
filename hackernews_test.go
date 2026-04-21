@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+)
 
 func TestGetHackerNewsStories(t *testing.T) {
 
@@ -96,13 +100,13 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 	t.Run("calls ClassifyTechNewsStory with correct parameters", func(t *testing.T) {
 
 		classifyTechNewsStoryCallCount := 0
-		classifyTechNewsStoryCallParameters := [][]StoryDetail{}
-		classifyTechNewsStory = func(stories []StoryDetail) []int {
+		classifyTechNewsStoryCallParameters := [][]hackernews_classifier.StoryDetail{}
+		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail) []int {
 			classifyTechNewsStoryCallCount++
 			classifyTechNewsStoryCallParameters = append(classifyTechNewsStoryCallParameters, stories)
 			return []int{}
 		}
-		defer func() { classifyTechNewsStory = ClassifyTechNewsStory }()
+		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
 		FilterHackerNewsStoriesByTitle([]HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
@@ -114,7 +118,7 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 			t.Fatalf("classifyTechNewsStory call count is invalid, expected 1, got %d", classifyTechNewsStoryCallCount)
 		}
 
-		expectedStoryDetails := []StoryDetail{
+		expectedStoryDetails := []hackernews_classifier.StoryDetail{
 			{Id: 1, Title: "story1"},
 			{Id: 2, Title: "story2"},
 			{Id: 3, Title: "story3"},
@@ -134,10 +138,10 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 
 	t.Run("returns filtered stories based on ClassifyTechNewsStory response", func(t *testing.T) {
 
-		classifyTechNewsStory = func(stories []StoryDetail) []int {
+		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail) []int {
 			return []int{1, 3}
 		}
-		defer func() { classifyTechNewsStory = ClassifyTechNewsStory }()
+		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
 		filteredStories := FilterHackerNewsStoriesByTitle([]HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},

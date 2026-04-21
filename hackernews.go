@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+
+	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
 )
 
 const (
@@ -19,7 +21,7 @@ var HACKERNEWS_NUM_PAGES_TO_QUERY = 1
 
 var getHackerNewsStoriesInPage = GetHackerNewsStoriesInPage
 var filterHackerNewsStoriesByTitle = FilterHackerNewsStoriesByTitle
-var classifyTechNewsStory = ClassifyTechNewsStory
+var classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory
 var getHackerNewsStories = GetHackerNewsStories
 
 type HackerNewsStory struct {
@@ -80,9 +82,9 @@ func GetHackerNewsStoriesInPage(page int) []HackerNewsStory {
 }
 
 func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory {
-	storiesWithTitle := []StoryDetail{}
+	storiesWithTitle := []hackernews_classifier.StoryDetail{}
 	for _, story := range stories {
-		storiesWithTitle = append(storiesWithTitle, StoryDetail{
+		storiesWithTitle = append(storiesWithTitle, hackernews_classifier.StoryDetail{
 			Id:    story.StoryId,
 			Title: story.Title,
 		})
