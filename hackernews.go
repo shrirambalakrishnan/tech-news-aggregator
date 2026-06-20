@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/profile"
 )
 
 const (
@@ -23,6 +24,7 @@ var getHackerNewsStoriesInPage = GetHackerNewsStoriesInPage
 var filterHackerNewsStoriesByTitle = FilterHackerNewsStoriesByTitle
 var classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory
 var getHackerNewsStories = GetHackerNewsStories
+var loadUserContext = profile.LoadUserContext
 
 type HackerNewsStory struct {
 	Author    string `json:"author"`
@@ -91,7 +93,19 @@ func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory
 	}
 	filteredStories := []HackerNewsStory{}
 
-	filteredStoryIds := classifyTechNewsStory(storiesWithTitle)
+	// Load the prebuilt interest profile and fail soft to the static rules if the
+	// artifact is missing (prebuild may not have run).
+	var userProfile hackernews_classifier.UserProfile
+	if userContext, err := loadUserContext(profile.USER_CONTEXT_FILE); err != nil {
+		log.Println("user context unavailable, using static classification rules:", err)
+	} else {
+		userProfile = hackernews_classifier.UserProfile{
+			Summary:   userContext.Summary,
+			Interests: userContext.Interests,
+		}
+	}
+
+	filteredStoryIds := classifyTechNewsStory(storiesWithTitle, userProfile)
 	log.Println("filteredStoryIds = ", filteredStoryIds)
 
 	for _, story := range stories {

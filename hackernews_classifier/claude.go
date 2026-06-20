@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"strconv"
+	"strings"
 
 	"github.com/shrirambalakrishnan/tech-news/claudeapi"
 )
@@ -13,11 +14,61 @@ type StoryDetail struct {
 	Title string
 }
 
+// UserProfile is the classifier's input contract for the user's interests. It
+// carries only the signal fields the classifier reasons over - never the
+// provenance metadata that lives on profile.UserContext. Add new signal fields
+// here (e.g. Languages, Topics) without churning any call site's signature; just
+// extend IsEmpty and the mapping in the caller.
+type UserProfile struct {
+	Summary   string
+	Interests []string
+}
+
+// IsEmpty reports whether the profile carries no usable signal, in which case
+// callers fall back to the static classification rules. Centralized so adding
+// fields updates the fail-soft check in one place.
+func (p UserProfile) IsEmpty() bool {
+	return p.Summary == "" && len(p.Interests) == 0
+}
+
 var constructPromptSystemAttribute = ConstructPromptSystemAttribute
 var constructPromptMessageAttribute = ConstructPromptMessageAttribute
 var claudeMessageApiCall = claudeapi.ClaudeMessageApiCall
 
-func ConstructPromptSystemAttribute() string {
+// ConstructPromptSystemAttribute builds the classifier system prompt. When the
+// profile carries no signal (prebuild hasn't run, or the artifact is missing) it
+// falls back to the static "technical computer science" ruleset. Otherwise it
+// classifies stories against the user's actual interests.
+func ConstructPromptSystemAttribute(profile UserProfile) string {
+	if profile.IsEmpty() {
+		return staticClassificationPrompt()
+	}
+
+	interests := strings.Join(profile.Interests, ", ")
+
+	return `You are a Hacker News story classifier that selects stories matching a specific reader's technical interests.
+
+Reader profile:
+` + profile.Summary + `
+
+The reader is interested in topics such as: ` + interests + `
+
+Classify a story as relevant if its title indicates it covers one of these interests or a closely related technical topic. Generalize sensibly from the profile - a listed interest implies adjacent subtopics within the same domain - but do NOT include stories that merely sit in the broad software industry without matching the reader's specific interests.
+
+Do NOT classify as relevant:
+- Tech industry news, business, fundraising, or hiring
+- Tech policy, regulation, or privacy law
+- Science that is not computer science (physics, biology, space)
+- General-interest or cultural stories, even if tech-adjacent
+- Topics outside the reader's interests above
+
+Return ONLY a JSON array of story IDs that are relevant.
+No explanation, no markdown fences, no wrapping.
+Example response: [123, 456, 789]
+`
+}
+
+func staticClassificationPrompt() string {
 	return `You are a Hacker News story classifier.
 
 	Classify stories as "technical computer science" if they are about:
@@ -53,9 +104,9 @@ func ConstructPromptMessageAttribute(stories []StoryDetail) string {
 	return prompt
 }
 
-func ClassifyTechNewsStory(stories []StoryDetail) []int {
+func ClassifyTechNewsStory(stories []StoryDetail, profile UserProfile) []int {
 	var classificationPrompt claudeapi.PromptInput
-	classificationPrompt.System = constructPromptSystemAttribute()
+	classificationPrompt.System = constructPromptSystemAttribute(profile)
 	classificationPrompt.Message = constructPromptMessageAttribute(stories)
 
 	var response claudeapi.Response
