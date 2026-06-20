@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/profile"
+)
 
 func TestGetHackerNewsStories(t *testing.T) {
 
@@ -95,14 +101,21 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 
 	t.Run("calls ClassifyTechNewsStory with correct parameters", func(t *testing.T) {
 
+		loadUserContext = func(path string) (profile.UserContext, error) {
+			return profile.UserContext{Summary: "backend work", Interests: []string{"Go", "Spanner"}}, nil
+		}
+		defer func() { loadUserContext = profile.LoadUserContext }()
+
 		classifyTechNewsStoryCallCount := 0
-		classifyTechNewsStoryCallParameters := [][]StoryDetail{}
-		classifyTechNewsStory = func(stories []StoryDetail) []int {
+		classifyTechNewsStoryCallParameters := [][]hackernews_classifier.StoryDetail{}
+		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
+		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
 			classifyTechNewsStoryCallCount++
 			classifyTechNewsStoryCallParameters = append(classifyTechNewsStoryCallParameters, stories)
+			classifyTechNewsStoryCallProfile = userProfile
 			return []int{}
 		}
-		defer func() { classifyTechNewsStory = ClassifyTechNewsStory }()
+		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
 		FilterHackerNewsStoriesByTitle([]HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
@@ -114,7 +127,11 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 			t.Fatalf("classifyTechNewsStory call count is invalid, expected 1, got %d", classifyTechNewsStoryCallCount)
 		}
 
-		expectedStoryDetails := []StoryDetail{
+		if classifyTechNewsStoryCallProfile.Summary != "backend work" || len(classifyTechNewsStoryCallProfile.Interests) != 2 {
+			t.Fatalf("expected loaded user context mapped into the profile, got %+v", classifyTechNewsStoryCallProfile)
+		}
+
+		expectedStoryDetails := []hackernews_classifier.StoryDetail{
 			{Id: 1, Title: "story1"},
 			{Id: 2, Title: "story2"},
 			{Id: 3, Title: "story3"},
@@ -134,10 +151,15 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 
 	t.Run("returns filtered stories based on ClassifyTechNewsStory response", func(t *testing.T) {
 
-		classifyTechNewsStory = func(stories []StoryDetail) []int {
+		loadUserContext = func(path string) (profile.UserContext, error) {
+			return profile.UserContext{Summary: "backend work"}, nil
+		}
+		defer func() { loadUserContext = profile.LoadUserContext }()
+
+		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
 			return []int{1, 3}
 		}
-		defer func() { classifyTechNewsStory = ClassifyTechNewsStory }()
+		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
 		filteredStories := FilterHackerNewsStoriesByTitle([]HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
@@ -158,6 +180,30 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 			if story != expectedFilteredStories[i] {
 				t.Fatalf("filtered stories are invalid, expected %v, got %v", expectedFilteredStories, filteredStories)
 			}
+		}
+
+	})
+
+	t.Run("fails soft to an empty profile when user context is unavailable", func(t *testing.T) {
+
+		loadUserContext = func(path string) (profile.UserContext, error) {
+			return profile.UserContext{}, errors.New("file not found")
+		}
+		defer func() { loadUserContext = profile.LoadUserContext }()
+
+		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
+		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
+			classifyTechNewsStoryCallProfile = userProfile
+			return []int{}
+		}
+		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
+
+		FilterHackerNewsStoriesByTitle([]HackerNewsStory{
+			{StoryId: 1, Title: "story1", Author: "Author1"},
+		})
+
+		if !classifyTechNewsStoryCallProfile.IsEmpty() {
+			t.Fatalf("expected an empty profile on load failure, got %+v", classifyTechNewsStoryCallProfile)
 		}
 
 	})

@@ -5,9 +5,23 @@ import (
 	"log"
 	"os"
 	"time"
+
+	"github.com/joho/godotenv"
+	"github.com/shrirambalakrishnan/tech-news/profile"
 )
 
 func main() {
+
+	godotenv.Load()
+
+	// Prebuild step: fetch GitHub READMEs, extract the user's interests via the
+	// LLM, and write profile/user_context.json. Run occasionally (not every 4h):
+	//   go run . prebuild
+	if len(os.Args) > 1 && os.Args[1] == "prebuild" {
+		profile.ExtractGithubProfile()
+		return
+	}
+
 	stories := GetMyHackerNewsStories()
 	log.Println("stories = ", stories)
 

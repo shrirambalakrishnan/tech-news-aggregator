@@ -24,11 +24,11 @@ CI (`.github/workflows/test.yml`) runs `go test ./...` on pushes/PRs to `main`. 
 Pipeline (entry point `main.go` → `GetMyHackerNewsStories()`):
 
 1. **`main` package** (repo root): `hackernews.go` fetches stories from the Algolia HN API (`hn.algolia.com`, `tags=front_page`, paginated), then filters them. `main.go` writes results to `stories.md`. `apiHelper.go` holds a generic `PostJSON` helper (currently unused — staged for a future refactor of the per-package HTTP code).
-2. **`hackernews_classifier` package**: builds the system + message prompts and calls Claude to classify a `[]StoryDetail` (id + title), returning the IDs deemed technical. The classification rules live as a hardcoded string in `ConstructPromptSystemAttribute`.
+2. **`hackernews_classifier` package**: builds the system + message prompts and calls Claude to classify a `[]StoryDetail` (id + title), returning the IDs deemed technical. `ConstructPromptSystemAttribute(UserProfile)` injects the user's interests when a profile is supplied, and falls back to a hardcoded static ruleset (`staticClassificationPrompt`) when the profile is empty. `UserProfile` is the classifier's own slim input contract (signal fields only) — `main` maps `profile.UserContext` into it, so the classifier never imports `profile`.
 3. **`claudeapi` package**: thin Anthropic Messages API client (`POST /v1/messages`). Model and request shape are hardcoded here (`ANTHROPIC_MODEL_NAME`).
-4. **`profile` package**: fetches a GitHub user's repos and their READMEs. Not yet wired into the pipeline — `ExtractGithubProfile()` is commented out in `main.go`. This is the foundation for the in-progress feature described below.
+4. **`profile` package**: fetches a GitHub user's repos and their READMEs (`github.go`), then extracts an interest profile from them via the LLM and reads/writes `profile/user_context.json` (`context.go`). Wired in as a **prebuild step**: `go run . prebuild` calls `ExtractGithubProfile()` and exits; the normal run skips it.
 
-Packages depend downward only: `main` → `hackernews_classifier` → `claudeapi`. `profile` is standalone.
+Packages depend downward only: `main` → `hackernews_classifier` → `claudeapi`, and `main` → `profile` → `claudeapi`.
 
 ## Key convention: function-variable dependency injection
 
@@ -50,4 +50,17 @@ This keeps tests free of network calls. When you add a function that calls anoth
 
 ## In-progress feature (branch `feature/3-pre-build-user-context`)
 
-`agents/issue_3.md` is the spec. Goal: replace the hardcoded classification rules with rules derived from the user's actual interests. A `prebuild` step uses the `profile` package to fetch the user's GitHub READMEs, asks the LLM to extract interest keywords, and writes them to `profile/user_context.json` (with a `generated_at` timestamp). The main run then injects those keywords into `ConstructPromptSystemAttribute`. `GITHUB_USERNAME` (see `.env.example`) selects the GitHub user.
+`agents/issue_3.md` is the spec. Goal: replace the hardcoded classification rules with rules derived from the user's actual interests.
+
+**Step 1 (done):** `profile/github.go` fetches the user's repos + READMEs. `GITHUB_USERNAME` (see `.env.example`) selects the user. We deliberately keep only README text for now — repo name/description/topics can be added later.
+
+**Step 2 (done):** `profile/context.go` sends all READMEs in one LLM call, extracts an interest profile, and writes `profile/user_context.json` via the `prebuild` entrypoint in `main.go`. The artifact is **git-ignored** (a regenerable cache, not source of truth) and read back with `LoadUserContext` — callers must **fail soft** (fall back to the static rules) when it's missing, since prebuild may not have run.
+
+**Step 3 (done):** `ConstructPromptSystemAttribute` now takes a `hackernews_classifier.UserProfile` (`summary` + `interests`) and builds an interest-driven prompt, falling back to the static ruleset when the profile `IsEmpty()`. `FilterHackerNewsStoriesByTitle` (in `hackernews.go`) calls `loadUserContext` (DI var → `profile.LoadUserContext`), maps `profile.UserContext` → `UserProfile`, and fails soft (empty profile → static rules) when the artifact is missing. To preserve the downward-only dependency rule, the classifier defines `UserProfile` itself rather than importing `profile`; `main` owns the mapping and drops the provenance metadata.
+
+### Design decisions (settled in discussion)
+
+- **Artifact format is a hybrid**, not bare keywords: a prose `summary` (for Claude to reason/generalize over) **plus** a flat `interests` array (inspectable/diffable), wrapped with metadata (`schema_version`, `generated_at`, `source`, `model`) for provenance and forward-compatibility. There is no useful "binary" form — everything stored is text the model reads.
+- **Why prebuild instead of sending READMEs raw every run:** the classify job runs every 4h (~180×/month); re-sending the same READMEs re-pays for those tokens each run. Prebuild extracts once and injects a ~300-token profile per call. Prompt caching can't help (max TTL 1h < 4h cadence). Cost/token table is in `README.md` → *Cost model*. The context window is *not* the binding constraint (30 READMEs ≈ 23% of Haiku's 200K).
+- **Prebuilt context is a lossy proxy, not equivalent to raw.** Distillation drops nuance, the extraction prompt imposes a lens, and the LLM is non-deterministic — so we cannot guarantee the same classifications as passing raw READMEs into the classify call. This is an accepted trade for cost/stability/inspectability. The fidelity gap should be *measured* via an offline eval (README roadmap), not assumed.
+- The `profile` package follows the same function-variable DI convention as the rest of the repo (`constructUserContextSystemAttribute`, `constructUserContextMessageAttribute`, `claudeMessageApiCall`).
