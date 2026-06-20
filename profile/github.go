@@ -41,9 +41,27 @@ func ExtractGithubProfile() {
 		return
 	}
 
-	log.Printf("Successfully fetched %d repository READMEs for user %s - %s", len(repoReadmes), githubUsername, repoReadmes)
+	log.Printf("Successfully fetched %d repository READMEs for user %s", len(repoReadmes), githubUsername)
 
+	if len(repoReadmes) == 0 {
+		log.Println("No READMEs fetched; skipping user context extraction.")
+		return
+	}
+
+	userContext, err := ExtractUserContext(repoReadmes, githubUsername)
+	if err != nil {
+		log.Printf("failed to extract user context: %v", err)
+		return
+	}
+
+	if err := WriteUserContext(userContext, USER_CONTEXT_FILE); err != nil {
+		log.Printf("failed to write user context: %v", err)
+		return
+	}
+
+	log.Printf("Wrote user context to %s (%d interests)", USER_CONTEXT_FILE, len(userContext.Interests))
 }
+
 func FetchRepoReadmes(githubUsername string) ([]string, error) {
 	repositories, err := FetchRepositories(githubUsername)
 	if err != nil {
