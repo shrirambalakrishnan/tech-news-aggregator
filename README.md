@@ -5,13 +5,12 @@
 	- write to a file with timestamp for me read
 
 ## Roadmap
-- application single llm call
-	- classify whether an article is a cs tech blog or not
-- application single llm call but with pre built context
-	- classify whether an article will be interesting for user based on his profile
-- application single llm call but augmented with RAG
-	- classify whether an article will be interesting for user based on his detailed profile
-- **eval: raw READMEs in the classify call vs. prebuilt profile extraction**
+- `Approach 1` [Completed ✅]
+	- classify whether an article is a cs tech blog or not using `Generic "CS Technical" filter`
+- `Approach 2` [Completed ✅]
+	- Extract user profile from Github Profile
+	- Filtering based on the `profile context` extracted from Github repos' readme files
+- **eval: raw READMEs in the classify call vs. prebuilt profile extraction** [Pending 🟠]
 	- The prebuild step distills READMEs into `profile/user_context.json` and the
 	  classify run reads that artifact. This is a *lossy proxy*, not a faithful
 	  replay of "what Claude would extract if we passed the raw READMEs into the
@@ -22,6 +21,10 @@
 	  and compares the classified sets (precision/recall/overlap), so the fidelity
 	  gap is measured rather than assumed. Use it to tune the extraction prompt to
 	  capture exactly the signals the classifier relies on.
+- `Approach 3` - Use RAG [Pending 🟠]
+	- Use RAG to set the context
+	- We can make use of full README contents of all repos
+	- Evaluate how this Approach 3 performs against Approach 1 and Approach 2
 
 ## Prebuild step (user context)
 
