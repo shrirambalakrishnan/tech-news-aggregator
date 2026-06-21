@@ -116,6 +116,27 @@ rm ~/Library/LaunchAgents/com.technews.plist
 ```
 
 
-## Next steps
-- tests
-- refactor PostJSON()
+## Eval Execution results
+
+### Run1 - based on user github profile context
+-- Confusion matrix --
+	TP (hit, flagged & relevant)        = 4
+	FP (false alarm, flagged but dud)   = 8
+	TN (correct skip)                   = 298
+	FN (miss, skipped but relevant)     = 31
+
+-- Metrics --
+	Precision (of flagged, % good)      = 0.3333
+	Recall    (of good, % caught)       = 0.1143
+
+### Run2 - based on generic CS promt
+
+-- Confusion matrix --
+  TP (hit, flagged & relevant)        = 14
+  FP (false alarm, flagged but dud)   = 120
+  TN (correct skip)                   = 186
+  FN (miss, skipped but relevant)     = 21
+
+-- Metrics --
+  Precision (of flagged, % good)      = 0.1045
+  Recall    (of good, % caught)       = 0.4000
