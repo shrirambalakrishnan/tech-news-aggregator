@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/shrirambalakrishnan/tech-news/evalHarness"
 	"github.com/shrirambalakrishnan/tech-news/profile"
 )
 
@@ -19,6 +20,15 @@ func main() {
 	//   go run . prebuild
 	if len(os.Args) > 1 && os.Args[1] == "prebuild" {
 		profile.ExtractGithubProfile()
+		return
+	}
+
+	// Eval step: run the classifier over the hand-labelled dataset and print
+	// precision/recall/F1/MCC/... plus the misclassified titles. Offline quality
+	// check, not part of the scheduled run:
+	//   go run . eval
+	if len(os.Args) > 1 && os.Args[1] == "eval" {
+		evalHarness.RunEval()
 		return
 	}
 
