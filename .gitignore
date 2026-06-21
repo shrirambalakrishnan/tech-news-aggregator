@@ -2,4 +2,9 @@
 stories.md
 .DS_Store
 tech-news
+
+# regeneratable
 profile/user_context.json
+
+# backup in notes
+evalHarness/hn-responses-labelled.json
