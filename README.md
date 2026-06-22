@@ -10,7 +10,7 @@
 - `Approach 2` [Completed ✅]
 	- Extract user profile from Github Profile
 	- Filtering based on the `profile context` extracted from Github repos' readme files
-- **eval: raw READMEs in the classify call vs. prebuilt profile extraction** [Pending 🟠]
+- **eval: raw READMEs in the classify call vs. prebuilt profile extraction** [Completed ✅]
 	- The prebuild step distills READMEs into `profile/user_context.json` and the
 	  classify run reads that artifact. This is a *lossy proxy*, not a faithful
 	  replay of "what Claude would extract if we passed the raw READMEs into the
@@ -21,10 +21,30 @@
 	  and compares the classified sets (precision/recall/overlap), so the fidelity
 	  gap is measured rather than assumed. Use it to tune the extraction prompt to
 	  capture exactly the signals the classifier relies on.
-- `Approach 3` - Use RAG [Pending 🟠]
-	- Use RAG to set the context
-	- We can make use of full README contents of all repos
-	- Evaluate how this Approach 3 performs against Approach 1 and Approach 2
+- `Approach 3` - Use RAG [Pending 🟠] — **experiential: does retrieval actually beat distillation here?**
+	- **Goal:** learn RAG hands-on *and* measure whether retrieval beats the
+	  distilled Approach 2 profile — don't assume it. The question is falsifiable via
+	  the eval harness (precision/recall vs Approach 1 & 2). "Distillation still wins"
+	  is an acceptable, documented outcome — not a failure.
+	- **Why now — the corpus changed.** The earlier "RAG doesn't fit here" call was
+	  about ~10 repo READMEs alone: small, query-independent, summarizable wholesale,
+	  so distillation strictly dominated. Approach 3 widens the corpus to ~10 personal
+	  blog posts + ~10 repo READMEs + ~10 white papers I've read. **White papers are
+	  the differentiator:** long and dense, they (a) don't distill cleanly without
+	  dropping the nuance that separates a relevant story from noise, and (b) are too
+	  costly to re-send raw on the 4-hourly cadence (re-paying tens of K tokens
+	  ~180×/month) while diluting the per-story signal. Retrieving only the relevant
+	  slices is RAG's genuine niche — the condition the rejection note named as "when
+	  RAG becomes the right call." It still only *partly* holds (the corpus likely
+	  fits Haiku's 200K window), so the win is measured, not assumed.
+	- **Why it might still lose (recorded up front):** the classifier has no natural
+	  per-query key — it builds a *fixed* interest model every run. Using the batch's
+	  story titles as the retrieval query biases toward *confirming* context, which
+	  can inflate false positives. The eval must watch **FP**, not just recall.
+	- **New dependency:** Anthropic has no embeddings endpoint, so RAG needs a
+	  third-party embedder (Voyage AI — Anthropic's recommended partner — or a local
+	  sentence-transformers model). Provider choice pending.
+	- Evaluate Approach 3 against Approach 1 and Approach 2 with the existing harness.
 
 ## Prebuild step (user context)
 
