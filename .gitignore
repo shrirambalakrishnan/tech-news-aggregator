@@ -8,3 +8,10 @@ profile/user_context.json
 
 # backup in notes
 evalHarness/hn-responses-labelled.json
+
+# raw resources to be processed for giving as input to RAG
+profile/blogs
+profile/whitepapers
+
+# processed resources input to RAG
+profile/corpus
