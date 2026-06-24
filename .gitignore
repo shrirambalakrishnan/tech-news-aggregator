@@ -10,6 +10,8 @@ profile/user_context.json
 evalHarness/hn-responses-labelled.json
 
 # raw resources to be processed for giving as input to RAG
+# contents backed up in Obsidian
+profile/readmes
 profile/blogs
 profile/whitepapers
 
