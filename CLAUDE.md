@@ -17,7 +17,15 @@ go test ./hackernews_classifier/ -run TestClassifyTechNewsStory   # single test,
 
 CI (`.github/workflows/test.yml`) runs `go test ./...` on pushes/PRs to `main`. There is no linter configured.
 
-`ANTHROPIC_API_KEY` is read via `os.Getenv` in `claudeapi`. For local runs export it directly; in production `tech-news-run.sh` fetches it from the Keychain (`security find-generic-password -s ANTHROPIC_API_KEY`). See README.md for the Keychain + launchd install steps.
+### Secrets & environment
+
+| Name | Type | Read by | Where it lives |
+|------|------|---------|----------------|
+| `ANTHROPIC_API_KEY` | secret | `claudeapi` (`os.Getenv`) — every Claude call | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | Approach 3 RAG embeddings step (**stored, not yet read in code**) | macOS Keychain |
+| `GITHUB_USERNAME` | non-secret | `profile/github.go` (`os.Getenv`) — whose READMEs to fetch | `.env` (see `.env.example`) |
+
+For local runs export the keys directly; in production `tech-news-run.sh` fetches secrets from the macOS Keychain (`security find-generic-password -a "$USER" -s <NAME> -w`) and exports them before `go run .`. **The runner currently exports only `ANTHROPIC_API_KEY`** — `VOYAGE_API_KEY` is in the Keychain ready for the embeddings step but is not exported or read anywhere yet. See README.md for the Keychain + launchd install steps.
 
 ## Architecture
 
@@ -82,6 +90,8 @@ Offline eval of the classifier against a hand-labelled dataset, to measure class
 
 **Known risk carried over (the retrieval-key problem):** the classifier has no natural per-query key — it builds a *fixed* interest model every run. Using the batch's story titles as the retrieval query biases retrieval toward *confirming* context and can inflate false positives. The eval must watch **FP**, not just recall.
 
-**New dependency:** Anthropic has no first-party embeddings endpoint, so the vector step needs a third-party embedder (Voyage AI — Anthropic's recommended partner — or a local sentence-transformers model). Provider choice pending.
+**New dependency (resolved):** Anthropic has no first-party embeddings endpoint, so the vector step uses a third-party embedder — **chosen: Voyage AI** (Anthropic's recommended partner). Its key is stored in the macOS Keychain as `VOYAGE_API_KEY` (see *Secrets & environment* above; not yet read in code).
+
+**Prerequisite done:** the corpus to embed is assembled under `profile/corpus/` (~10 blog posts + ~10 repo READMEs + ~10 white papers). It is git-ignored (see `.gitignore`), as are the raw sources in `profile/{readmes,blogs,whitepapers}` (backed up in Obsidian). **Next step:** chunk + embed every `profile/corpus/` file via Voyage to build the retrieval index (also git-ignored, like `user_context.json`).
 
 **Integration seam (when built):** identical to Approach 2 — `FilterHackerNewsStoriesByTitle` → `ConstructPromptSystemAttribute`, swapping the context source from static `user_context.json` to retrieved chunks behind a `loadRagContext` DI var alongside `loadUserContext`. Follow the function-variable DI convention; keep the index artifact git-ignored like `user_context.json`.

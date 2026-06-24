@@ -41,9 +41,13 @@
 	  per-query key — it builds a *fixed* interest model every run. Using the batch's
 	  story titles as the retrieval query biases toward *confirming* context, which
 	  can inflate false positives. The eval must watch **FP**, not just recall.
-	- **New dependency:** Anthropic has no embeddings endpoint, so RAG needs a
-	  third-party embedder (Voyage AI — Anthropic's recommended partner — or a local
-	  sentence-transformers model). Provider choice pending.
+	- **New dependency (resolved):** Anthropic has no embeddings endpoint, so RAG needs
+	  a third-party embedder. **Chosen: Voyage AI** (Anthropic's recommended partner);
+	  its key is stored in the macOS Keychain as `VOYAGE_API_KEY` (see *Secrets &
+	  environment* under Setup).
+	- **Prerequisite done:** the corpus to embed is assembled under `profile/corpus/`
+	  (git-ignored; ~10 blog posts + ~10 repo READMEs + ~10 white papers). **Next step:**
+	  chunk + embed every corpus file via Voyage to build the retrieval index.
 	- Evaluate Approach 3 against Approach 1 and Approach 2 with the existing harness.
 
 ## Prebuild step (user context)
@@ -87,19 +91,33 @@ Notes:
 
 ## Setup
 
-### API Key (macOS Keychain)
+### Secrets & environment
 
-Cron jobs don't inherit shell environment variables, so the API key must be stored in macOS Keychain.
+The project needs two secret API keys and one non-secret config value:
 
-**Store the key (one-time):**
+| Name | Type | Used by | Where it lives |
+|------|------|---------|----------------|
+| `ANTHROPIC_API_KEY` | secret | `claudeapi` — every Claude call (classify + profile extraction) | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | Approach 3 RAG — embedding the `profile/corpus` chunks via Voyage AI *(stored now; not yet wired in code)* | macOS Keychain |
+| `GITHUB_USERNAME` | non-secret | `profile` prebuild — whose repo READMEs to fetch | `.env` (see `.env.example`) |
+
+#### API keys (macOS Keychain)
+
+Cron/launchd jobs don't inherit shell environment variables, so secret keys are stored in the macOS Keychain and exported by `tech-news-run.sh` at run time.
+
+**Store the keys (one-time):**
 ```bash
-security add-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w "your-api-key-here"
+security add-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w "your-anthropic-key-here"
+security add-generic-password -a "$USER" -s "VOYAGE_API_KEY"    -w "your-voyage-key-here"
 ```
 
-**Verify it works:**
+**Verify they work:**
 ```bash
 security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w
+security find-generic-password -a "$USER" -s "VOYAGE_API_KEY"    -w
 ```
+
+> **Note:** `tech-news-run.sh` currently exports only `ANTHROPIC_API_KEY`. The Approach 3 embeddings step will export `VOYAGE_API_KEY` the same way once it's built — the key is stored in the Keychain ahead of time so that step is ready to wire up.
 
 ## Runner script
 
