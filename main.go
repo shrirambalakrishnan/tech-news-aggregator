@@ -9,6 +9,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/shrirambalakrishnan/tech-news/evalHarness"
 	"github.com/shrirambalakrishnan/tech-news/profile"
+	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 func main() {
@@ -29,6 +30,15 @@ func main() {
 	//   go run . eval
 	if len(os.Args) > 1 && os.Args[1] == "eval" {
 		evalHarness.RunEval()
+		return
+	}
+
+	// Embed step: chunk profile/corpus, embed each chunk via Voyage, and write
+	// profile/corpus_index.json (the Approach 3 RAG index). Run occasionally
+	// (not every 4h); requires VOYAGE_API_KEY in env:
+	//   go run . embed
+	if len(os.Args) > 1 && os.Args[1] == "embed" {
+		rag.BuildCorpusIndex()
 		return
 	}
 
