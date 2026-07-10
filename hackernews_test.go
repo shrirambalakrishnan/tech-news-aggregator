@@ -6,6 +6,7 @@ import (
 
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
 	"github.com/shrirambalakrishnan/tech-news/profile"
+	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 func TestGetHackerNewsStories(t *testing.T) {
@@ -106,6 +107,11 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		}
 		defer func() { loadUserContext = profile.LoadUserContext }()
 
+		loadRagContext = func(query string, k int) ([]string, error) {
+			return nil, errors.New("no corpus index in tests")
+		}
+		defer func() { loadRagContext = rag.RetrieveContext }()
+
 		classifyTechNewsStoryCallCount := 0
 		classifyTechNewsStoryCallParameters := [][]hackernews_classifier.StoryDetail{}
 		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
@@ -156,6 +162,11 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		}
 		defer func() { loadUserContext = profile.LoadUserContext }()
 
+		loadRagContext = func(query string, k int) ([]string, error) {
+			return nil, errors.New("no corpus index in tests")
+		}
+		defer func() { loadRagContext = rag.RetrieveContext }()
+
 		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
 			return []int{1, 3}
 		}
@@ -191,6 +202,11 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		}
 		defer func() { loadUserContext = profile.LoadUserContext }()
 
+		loadRagContext = func(query string, k int) ([]string, error) {
+			return nil, errors.New("no corpus index in tests")
+		}
+		defer func() { loadRagContext = rag.RetrieveContext }()
+
 		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
 		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
 			classifyTechNewsStoryCallProfile = userProfile
@@ -204,6 +220,50 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 
 		if !classifyTechNewsStoryCallProfile.IsEmpty() {
 			t.Fatalf("expected an empty profile on load failure, got %+v", classifyTechNewsStoryCallProfile)
+		}
+
+	})
+
+	t.Run("passes retrieved rag chunks to the classifier with the titles as query", func(t *testing.T) {
+
+		loadUserContext = func(path string) (profile.UserContext, error) {
+			return profile.UserContext{Summary: "backend work"}, nil
+		}
+		defer func() { loadUserContext = profile.LoadUserContext }()
+
+		var gotQuery string
+		var gotK int
+		loadRagContext = func(query string, k int) ([]string, error) {
+			gotQuery = query
+			gotK = k
+			return []string{"chunk about spanner", "chunk about raft"}, nil
+		}
+		defer func() { loadRagContext = rag.RetrieveContext }()
+
+		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
+		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
+			classifyTechNewsStoryCallProfile = userProfile
+			return []int{}
+		}
+		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
+
+		FilterHackerNewsStoriesByTitle([]HackerNewsStory{
+			{StoryId: 1, Title: "story1", Author: "Author1"},
+			{StoryId: 2, Title: "story2", Author: "Author2"},
+		})
+
+		if gotQuery != "story1\nstory2" {
+			t.Fatalf("expected the batch titles as retrieval query, got %q", gotQuery)
+		}
+		if gotK != rag.RETRIEVAL_TOP_K {
+			t.Fatalf("expected k = RETRIEVAL_TOP_K (%d), got %d", rag.RETRIEVAL_TOP_K, gotK)
+		}
+		if len(classifyTechNewsStoryCallProfile.CorpusChunks) != 2 ||
+			classifyTechNewsStoryCallProfile.CorpusChunks[0] != "chunk about spanner" {
+			t.Fatalf("expected retrieved chunks on the profile, got %+v", classifyTechNewsStoryCallProfile)
+		}
+		if classifyTechNewsStoryCallProfile.Summary != "backend work" {
+			t.Fatalf("expected the loaded profile to remain as fallback, got %+v", classifyTechNewsStoryCallProfile)
 		}
 
 	})

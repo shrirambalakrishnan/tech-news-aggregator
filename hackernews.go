@@ -5,9 +5,11 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
 	"github.com/shrirambalakrishnan/tech-news/profile"
+	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 const (
@@ -25,6 +27,7 @@ var filterHackerNewsStoriesByTitle = FilterHackerNewsStoriesByTitle
 var classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory
 var getHackerNewsStories = GetHackerNewsStories
 var loadUserContext = profile.LoadUserContext
+var loadRagContext = rag.RetrieveContext
 
 type HackerNewsStory struct {
 	Author    string `json:"author"`
@@ -103,6 +106,22 @@ func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory
 			Summary:   userContext.Summary,
 			Interests: userContext.Interests,
 		}
+	}
+
+	// Approach 3 (RAG): retrieve the corpus chunks most similar to this batch
+	// and hand them to the classifier, which prefers them over Summary/Interests.
+	// The batch's titles double as the retrieval query — the known
+	// confirmation-bias trade-off (see CLAUDE.md, retrieval-key problem). Fail
+	// soft: if the index is missing (embed step not run) or retrieval fails, the
+	// profile loaded above / static rules still apply.
+	titles := make([]string, 0, len(storiesWithTitle))
+	for _, story := range storiesWithTitle {
+		titles = append(titles, story.Title)
+	}
+	if chunks, err := loadRagContext(strings.Join(titles, "\n"), rag.RETRIEVAL_TOP_K); err != nil {
+		log.Println("rag context unavailable, using profile/static rules:", err)
+	} else {
+		userProfile.CorpusChunks = chunks
 	}
 
 	filteredStoryIds := classifyTechNewsStory(storiesWithTitle, userProfile)

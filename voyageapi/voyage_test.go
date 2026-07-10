@@ -175,3 +175,30 @@ func TestPacingDelayFloorIsRequestGap(t *testing.T) {
 		t.Errorf("tiny batch should floor at the request gap, got %s", d)
 	}
 }
+
+func TestEmbedQueryUsesQueryInputType(t *testing.T) {
+	original := embedBatch
+	defer func() { embedBatch = original }()
+
+	var gotTexts []string
+	var gotInputType string
+	embedBatch = func(texts []string, inputType string) ([][]float32, error) {
+		gotTexts = texts
+		gotInputType = inputType
+		return [][]float32{{0.1, 0.2}}, nil
+	}
+
+	vec, err := EmbedQuery("distributed systems")
+	if err != nil {
+		t.Fatalf("EmbedQuery returned error: %v", err)
+	}
+	if gotInputType != VOYAGE_INPUT_TYPE_QUERY {
+		t.Errorf("expected input type %q, got %q", VOYAGE_INPUT_TYPE_QUERY, gotInputType)
+	}
+	if !reflect.DeepEqual(gotTexts, []string{"distributed systems"}) {
+		t.Errorf("texts sent = %v", gotTexts)
+	}
+	if !reflect.DeepEqual(vec, []float32{0.1, 0.2}) {
+		t.Errorf("vector = %v, want [0.1 0.2]", vec)
+	}
+}

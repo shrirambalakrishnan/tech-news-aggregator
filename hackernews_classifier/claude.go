@@ -22,24 +22,33 @@ type StoryDetail struct {
 type UserProfile struct {
 	Summary   string
 	Interests []string
+	// CorpusChunks carries Approach 3 (RAG) context: corpus excerpts retrieved
+	// for the current batch of stories. When present it takes precedence over
+	// Summary/Interests in prompt construction, so each eval arm stays pure —
+	// a prompt is built from exactly one context source.
+	CorpusChunks []string
 }
 
 // IsEmpty reports whether the profile carries no usable signal, in which case
 // callers fall back to the static classification rules. Centralized so adding
 // fields updates the fail-soft check in one place.
 func (p UserProfile) IsEmpty() bool {
-	return p.Summary == "" && len(p.Interests) == 0
+	return p.Summary == "" && len(p.Interests) == 0 && len(p.CorpusChunks) == 0
 }
 
 var constructPromptSystemAttribute = ConstructPromptSystemAttribute
 var constructPromptMessageAttribute = ConstructPromptMessageAttribute
 var claudeMessageApiCall = claudeapi.ClaudeMessageApiCall
 
-// ConstructPromptSystemAttribute builds the classifier system prompt. When the
-// profile carries no signal (prebuild hasn't run, or the artifact is missing) it
-// falls back to the static "technical computer science" ruleset. Otherwise it
-// classifies stories against the user's actual interests.
+// ConstructPromptSystemAttribute builds the classifier system prompt, choosing
+// the richest context source available: retrieved corpus chunks (Approach 3 /
+// RAG) over the distilled profile (Approach 2) over the static ruleset
+// (Approach 1). Each prompt uses exactly one source so the approaches stay
+// comparable in the eval.
 func ConstructPromptSystemAttribute(profile UserProfile) string {
+	if len(profile.CorpusChunks) > 0 {
+		return ragClassificationPrompt(profile.CorpusChunks)
+	}
 	if profile.IsEmpty() {
 		return staticClassificationPrompt()
 	}
@@ -61,6 +70,36 @@ Do NOT classify as relevant:
 - Science that is not computer science (physics, biology, space)
 - General-interest or cultural stories, even if tech-adjacent
 - Topics outside the reader's interests above
+
+Return ONLY a JSON array of story IDs that are relevant.
+No explanation, no markdown fences, no wrapping.
+Example response: [123, 456, 789]
+`
+}
+
+// ragClassificationPrompt builds the Approach 3 system prompt: instead of a
+// distilled profile it presents raw corpus excerpts retrieved for this batch
+// and asks Claude to infer the reader's interests from them. The negative
+// rules and the output contract deliberately mirror the profile prompt so the
+// eval arms differ only in their context source.
+func ragClassificationPrompt(chunks []string) string {
+	excerpts := ""
+	for i, chunk := range chunks {
+		excerpts += "--- Excerpt " + strconv.Itoa(i+1) + " ---\n" + chunk + "\n\n"
+	}
+
+	return `You are a Hacker News story classifier that selects stories matching a specific reader's technical interests.
+
+The excerpts below are taken from documents the reader collected: repository READMEs, blog posts, and white papers they are interested in. Treat them as evidence of the reader's technical interests.
+
+` + excerpts + `Classify a story as relevant if its title indicates it covers a topic these excerpts show the reader cares about, or a closely related technical topic. Generalize sensibly - an excerpt implies interest in adjacent subtopics within the same domain - but do NOT include stories that merely sit in the broad software industry without matching these interests.
+
+Do NOT classify as relevant:
+- Tech industry news, business, fundraising, or hiring
+- Tech policy, regulation, or privacy law
+- Science that is not computer science (physics, biology, space)
+- General-interest or cultural stories, even if tech-adjacent
+- Topics outside the interests evidenced above
 
 Return ONLY a JSON array of story IDs that are relevant.
 No explanation, no markdown fences, no wrapping.

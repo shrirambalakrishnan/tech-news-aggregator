@@ -20,6 +20,19 @@ import (
 // hitting the network.
 var embedBatch = embedBatchHTTP
 
+// EmbedQuery embeds a single retrieval query. Voyage optimizes embeddings
+// differently for the two sides of retrieval (input_type "query" vs
+// "document"), so queries must not be embedded with EmbedDocuments. A single
+// query is one small request — no batching or pacing needed — but it shares
+// the 429 retry backstop.
+func EmbedQuery(text string) ([]float32, error) {
+	vecs, err := embedBatchWithRetry([]string{text}, VOYAGE_INPUT_TYPE_QUERY)
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+	return vecs[0], nil
+}
+
 // EmbedDocuments embeds texts as retrieval documents, returning one vector per
 // input text in the same order. It splits texts into token-bounded batches and
 // paces requests to respect Voyage's free-tier rate limits (see ratelimit.go).

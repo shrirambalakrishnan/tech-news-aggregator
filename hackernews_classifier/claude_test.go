@@ -25,6 +25,12 @@ func TestUserProfileIsEmpty(t *testing.T) {
 			t.Fatalf("expected UserProfile with interests to not be empty")
 		}
 	})
+
+	t.Run("false when corpus chunks are set", func(t *testing.T) {
+		if (UserProfile{CorpusChunks: []string{"a retrieved chunk"}}).IsEmpty() {
+			t.Fatalf("expected UserProfile with corpus chunks to not be empty")
+		}
+	})
 }
 
 func TestConstructPromptSystemAttribute(t *testing.T) {
@@ -80,6 +86,28 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 		}
 		if strings.Contains(got, "Programming languages, compilers, interpreters") {
 			t.Fatalf("expected dynamic prompt to omit the static ruleset, got %s", got)
+		}
+	})
+
+	t.Run("prefers retrieved corpus chunks over the profile summary and interests", func(t *testing.T) {
+		profile := UserProfile{
+			Summary:      "Repositories focus on distributed systems.",
+			Interests:    []string{"Spanner"},
+			CorpusChunks: []string{"TrueTime bounds clock uncertainty", "Raft elects a single leader"},
+		}
+
+		got := ConstructPromptSystemAttribute(profile)
+
+		for i, chunk := range profile.CorpusChunks {
+			if !strings.Contains(got, chunk) {
+				t.Fatalf("expected rag prompt to contain chunk %d, got %s", i+1, got)
+			}
+		}
+		if strings.Contains(got, profile.Summary) {
+			t.Fatalf("expected rag prompt to omit the profile summary (arms stay pure), got %s", got)
+		}
+		if strings.Contains(got, "Programming languages, compilers, interpreters") {
+			t.Fatalf("expected rag prompt to omit the static ruleset, got %s", got)
 		}
 	})
 
