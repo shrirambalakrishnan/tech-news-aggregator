@@ -17,3 +17,5 @@ profile/whitepapers
 
 # processed resources input to RAG
 profile/corpus
+
+profile/corpus_index*.json
