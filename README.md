@@ -45,10 +45,12 @@
 	  a third-party embedder. **Chosen: Voyage AI** (Anthropic's recommended partner);
 	  its key is stored in the macOS Keychain as `VOYAGE_API_KEY` (see *Secrets &
 	  environment* under Setup).
-	- **Prerequisite done:** the corpus to embed is assembled under `profile/corpus/`
-	  (git-ignored; ~10 blog posts + ~10 repo READMEs + ~10 white papers). **Next step:**
-	  chunk + embed every corpus file via Voyage to build the retrieval index.
-	- Evaluate Approach 3 against Approach 1 and Approach 2 with the existing harness.
+	- **Embed step done:** `go run . embed` chunks `profile/corpus/` (git-ignored; ~10
+	  blogs + ~10 READMEs + ~10 white papers) and embeds it via Voyage into
+	  `profile/corpus_index.json` (see *Embeddings step* below).
+	- **Next step:** retrieval — embed each batch as a query, cosine top-k against the
+	  index, inject the retrieved chunks into the classify prompt, then evaluate
+	  Approach 3 against Approach 1 and Approach 2 with the existing harness.
 
 ## Prebuild step (user context)
 
@@ -57,6 +59,36 @@ see `.env.example`), asks the LLM to extract an interest profile, and writes it 
 `profile/user_context.json` (a regenerable, git-ignored cache with a
 `generated_at` timestamp). The normal `go run .` run reads that file. Run prebuild
 occasionally — **not** on the 4-hourly schedule — since it is the expensive path.
+
+## Embeddings step (Approach 3 / RAG)
+
+`go run . embed` builds the RAG index used by Approach 3. It reads every file in
+`profile/corpus/`, splits each into fixed-size **word windows** (800 words, 120-word
+overlap), embeds the chunks with **Voyage AI** (`voyage-4-lite`), and writes
+`profile/corpus_index.json` — a git-ignored, regenerable cache holding provenance
+metadata plus one record per chunk (`source`, `type`, `chunk_index`, `text`,
+`embedding`). Run it occasionally (a one-off, like prebuild — **not** on the 4-hourly
+schedule), and re-run it whenever the corpus changes.
+
+It needs `VOYAGE_API_KEY` in the environment (one-off — not exported by
+`tech-news-run.sh`):
+
+```bash
+export VOYAGE_API_KEY=$(security find-generic-password -a "$USER" -s VOYAGE_API_KEY -w)
+go run . embed
+```
+
+**Overlap, briefly:** consecutive chunks share their last 120 words so an idea that
+straddles a window boundary still appears whole in at least one chunk (same trick as
+re-reading a tail of the previous block when a record spans a fixed-size block).
+
+**Free-tier rate limit:** without a payment method, Voyage throttles to **3
+requests/min and 10K tokens/min** (the 200M free-token allowance still applies, so the
+~150K-token corpus is effectively free). The embedder paces around this — token-bounded
+batches, an inter-request delay, and 429 retry-with-backoff — so a full run takes
+**~20 min**. Adding a payment method on the Voyage dashboard lifts the throttle (still
+free under 200M tokens); the pacing then just becomes harmless overhead. Retrieval and
+wiring into the classifier are the **next** step, not yet built.
 
 ## Cost model: raw READMEs vs. prebuilt context
 

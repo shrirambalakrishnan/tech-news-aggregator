@@ -10,6 +10,9 @@ A Go CLI that fetches HackerNews front-page stories, uses the Claude API to clas
 
 ```bash
 go run .                        # build + run (requires ANTHROPIC_API_KEY in env)
+go run . prebuild               # extract GitHub interest profile -> profile/user_context.json (occasional)
+go run . eval                   # offline classifier eval over the labelled dataset
+go run . embed                  # chunk+embed profile/corpus -> profile/corpus_index.json (requires VOYAGE_API_KEY; ~20 min on Voyage free tier)
 go test ./...                   # run all tests
 go test ./hackernews_classifier/ -run TestClassifyTechNewsStory   # single test, single package
 ./tech-news-run.sh              # production entrypoint: pulls API key from macOS Keychain, then `go run .`
@@ -22,10 +25,10 @@ CI (`.github/workflows/test.yml`) runs `go test ./...` on pushes/PRs to `main`. 
 | Name | Type | Read by | Where it lives |
 |------|------|---------|----------------|
 | `ANTHROPIC_API_KEY` | secret | `claudeapi` (`os.Getenv`) — every Claude call | macOS Keychain |
-| `VOYAGE_API_KEY` | secret | Approach 3 RAG embeddings step (**stored, not yet read in code**) | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | `voyageapi` (`os.Getenv`) — the `go run . embed` step only | macOS Keychain |
 | `GITHUB_USERNAME` | non-secret | `profile/github.go` (`os.Getenv`) — whose READMEs to fetch | `.env` (see `.env.example`) |
 
-For local runs export the keys directly; in production `tech-news-run.sh` fetches secrets from the macOS Keychain (`security find-generic-password -a "$USER" -s <NAME> -w`) and exports them before `go run .`. **The runner currently exports only `ANTHROPIC_API_KEY`** — `VOYAGE_API_KEY` is in the Keychain ready for the embeddings step but is not exported or read anywhere yet. See README.md for the Keychain + launchd install steps.
+For local runs export the keys directly; in production `tech-news-run.sh` fetches secrets from the macOS Keychain (`security find-generic-password -a "$USER" -s <NAME> -w`) and exports them before `go run .`. **The runner exports only `ANTHROPIC_API_KEY`** — `VOYAGE_API_KEY` is needed only by the one-off `go run . embed` step (not the 4-hourly run), so export it manually for that: `export VOYAGE_API_KEY=$(security find-generic-password -a "$USER" -s VOYAGE_API_KEY -w)`. See README.md for the Keychain + launchd install steps.
 
 ## Architecture
 
@@ -35,8 +38,10 @@ Pipeline (entry point `main.go` → `GetMyHackerNewsStories()`):
 2. **`hackernews_classifier` package**: builds the system + message prompts and calls Claude to classify a `[]StoryDetail` (id + title), returning the IDs deemed technical. **All cumulated stories go to Claude in a single API call per run** — `FilterHackerNewsStoriesByTitle` flattens the whole fetched slice into one `ClassifyTechNewsStory` call; it is *not* batched by page. The Algolia page size (`HACKERNEWS_HITS_PER_PAGE`) only controls how many stories are *fetched*, not the Claude batch size; with the defaults the single call happens to carry ~30 stories. `ConstructPromptSystemAttribute(UserProfile)` injects the user's interests when a profile is supplied, and falls back to a hardcoded static ruleset (`staticClassificationPrompt`) when the profile is empty. `UserProfile` is the classifier's own slim input contract (signal fields only) — `main` maps `profile.UserContext` into it, so the classifier never imports `profile`.
 3. **`claudeapi` package**: thin Anthropic Messages API client (`POST /v1/messages`). Model and request shape are hardcoded here (`ANTHROPIC_MODEL_NAME`).
 4. **`profile` package**: fetches a GitHub user's repos and their READMEs (`github.go`), then extracts an interest profile from them via the LLM and reads/writes `profile/user_context.json` (`context.go`). Wired in as a **prebuild step**: `go run . prebuild` calls `ExtractGithubProfile()` and exits; the normal run skips it.
+5. **`voyageapi` package** (Approach 3): thin Voyage AI embeddings client (`POST /v1/embeddings`), mirroring `claudeapi`. `EmbedDocuments([]string) ([][]float32, error)` token-batches inputs and **paces requests for Voyage's no-payment tier** (3 RPM / 10K TPM): token-bounded batches, an inter-request delay, and 429 retry-with-backoff (all tunable package vars). Reads `VOYAGE_API_KEY`. Organized **one file per layer**: `voyage.go` (PUBLIC API: `EmbedDocuments` + the `embedBatch` DI seam), `ratelimit.go` (POLICY: free-tier config vars, `planBatches`, `pacingDelay`, retry), `client.go` (TRANSPORT: wire types + `embedBatchHTTP`).
+6. **`rag` package** (Approach 3): organized **one file per pipeline stage** — `corpus.go` is the INPUT stage (`CORPUS_DIR`, `readCorpusFiles`, `inferType`; types are stamped at read time so later stages never inspect filenames); `chunk.go` is the TRANSFORM stage (pure `ChunkText(text, window, overlap)`, fixed-size word windows, 800/120); `index.go` is the OUTPUT stage (the `CorpusIndex` artifact: provenance metadata + `[]Chunk`, with `Write`/`LoadCorpusIndex`); `build.go` is the PIPELINE (the `embedDocuments` DI seam, `buildIndex`, and `BuildCorpusIndex()` orchestrating read `profile/corpus/` → chunk → embed → write `profile/corpus_index.json`). Retrieval will slot in as `retrieve.go`, another stage file consuming `index.go`. Wired as the **embed step**: `go run . embed`. Index is git-ignored, fail-soft, like `user_context.json`. **Retrieval into the classifier is not built yet** (next step).
 
-Packages depend downward only: `main` → `hackernews_classifier` → `claudeapi`, and `main` → `profile` → `claudeapi`.
+Packages depend downward only: `main` → `hackernews_classifier` → `claudeapi`, `main` → `profile` → `claudeapi`, and `main` → `rag` → `voyageapi`.
 
 ## Key convention: function-variable dependency injection
 
@@ -90,8 +95,12 @@ Offline eval of the classifier against a hand-labelled dataset, to measure class
 
 **Known risk carried over (the retrieval-key problem):** the classifier has no natural per-query key — it builds a *fixed* interest model every run. Using the batch's story titles as the retrieval query biases retrieval toward *confirming* context and can inflate false positives. The eval must watch **FP**, not just recall.
 
-**New dependency (resolved):** Anthropic has no first-party embeddings endpoint, so the vector step uses a third-party embedder — **chosen: Voyage AI** (Anthropic's recommended partner). Its key is stored in the macOS Keychain as `VOYAGE_API_KEY` (see *Secrets & environment* above; not yet read in code).
+**New dependency (resolved):** Anthropic has no first-party embeddings endpoint, so the vector step uses a third-party embedder — **chosen: Voyage AI** (`voyage-4-lite`). Key in the macOS Keychain as `VOYAGE_API_KEY`; read by the `voyageapi` package.
 
-**Prerequisite done:** the corpus to embed is assembled under `profile/corpus/` (~10 blog posts + ~10 repo READMEs + ~10 white papers). It is git-ignored (see `.gitignore`), as are the raw sources in `profile/{readmes,blogs,whitepapers}` (backed up in Obsidian). **Next step:** chunk + embed every `profile/corpus/` file via Voyage to build the retrieval index (also git-ignored, like `user_context.json`).
+**Embed step (done):** `go run . embed` (→ `rag.BuildCorpusIndex()`) reads `profile/corpus/` (~10 blogs + ~10 READMEs + ~10 white papers), chunks each file into 800-word windows with 120-word overlap (`rag.ChunkText`), embeds all chunks via `voyageapi.EmbedDocuments`, and writes `profile/corpus_index.json` (git-ignored; provenance metadata + per-chunk `{source, type, chunk_index, text, embedding}`). The corpus and raw sources in `profile/{readmes,blogs,whitepapers}` are git-ignored too (backed up in Obsidian).
+
+**Free-tier rate limit (important):** Voyage's no-payment tier throttles to **3 requests/min and 10K tokens/min** (the 200M free-token allowance still applies, so the ~150K-token corpus is ~free). `voyageapi` paces around this, so a full `embed` run takes **~20 min**. Adding a payment method on the Voyage dashboard lifts the throttle (still free under 200M tokens) and the pacing just becomes harmless overhead.
+
+**Next step:** retrieval — embed the batch as a query (`VOYAGE_INPUT_TYPE_QUERY`), cosine top-k against `LoadCorpusIndex`, inject the retrieved chunks via a `loadRagContext` DI seam in `FilterHackerNewsStoriesByTitle`, then eval Approach 3 vs 1 & 2.
 
 **Integration seam (when built):** identical to Approach 2 — `FilterHackerNewsStoriesByTitle` → `ConstructPromptSystemAttribute`, swapping the context source from static `user_context.json` to retrieved chunks behind a `loadRagContext` DI var alongside `loadUserContext`. Follow the function-variable DI convention; keep the index artifact git-ignored like `user_context.json`.
