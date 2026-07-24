@@ -9,6 +9,23 @@ import (
 	"github.com/shrirambalakrishnan/tech-news/claudeapi"
 )
 
+// Arm selects, explicitly, which classification flow runs. It replaces the old
+// implicit selection (which branched on whether a profile was present on disk).
+// The caller decides the arm; nothing on disk overrides it. See issue #11.
+type Arm int
+
+const (
+	// ArmGeneric classifies against the hardcoded static "technical computer
+	// science" ruleset with no user profile. Production default.
+	ArmGeneric Arm = 0
+	// ArmInterests classifies against the user's distilled interest profile
+	// (summary + interests) injected into the prompt.
+	ArmInterests Arm = 1
+	// ArmRAG is the future RAG/embedding flow. Stubbed this iteration; the
+	// profile-init step errors before the classifier is ever reached.
+	ArmRAG Arm = 2
+)
+
 type StoryDetail struct {
 	Id    int
 	Title string
@@ -24,9 +41,10 @@ type UserProfile struct {
 	Interests []string
 }
 
-// IsEmpty reports whether the profile carries no usable signal, in which case
-// callers fall back to the static classification rules. Centralized so adding
-// fields updates the fail-soft check in one place.
+// IsEmpty reports whether the profile carries no usable signal. Since flow
+// selection is now explicit (via Arm), callers use this as a defensive check -
+// e.g. to reject an ArmInterests run whose loaded profile turned out empty.
+// Centralized so adding signal fields updates the check in one place.
 func (p UserProfile) IsEmpty() bool {
 	return p.Summary == "" && len(p.Interests) == 0
 }
@@ -35,12 +53,12 @@ var constructPromptSystemAttribute = ConstructPromptSystemAttribute
 var constructPromptMessageAttribute = ConstructPromptMessageAttribute
 var claudeMessageApiCall = claudeapi.ClaudeMessageApiCall
 
-// ConstructPromptSystemAttribute builds the classifier system prompt. When the
-// profile carries no signal (prebuild hasn't run, or the artifact is missing) it
-// falls back to the static "technical computer science" ruleset. Otherwise it
-// classifies stories against the user's actual interests.
-func ConstructPromptSystemAttribute(profile UserProfile) string {
-	if profile.IsEmpty() {
+// ConstructPromptSystemAttribute builds the classifier system prompt for the
+// chosen arm. ArmGeneric returns the static "technical computer science"
+// ruleset; ArmInterests classifies against the user's actual interests. The arm
+// drives the flow explicitly - the profile's emptiness no longer selects it.
+func ConstructPromptSystemAttribute(arm Arm, profile UserProfile) string {
+	if arm == ArmGeneric {
 		return staticClassificationPrompt()
 	}
 
@@ -104,9 +122,9 @@ func ConstructPromptMessageAttribute(stories []StoryDetail) string {
 	return prompt
 }
 
-func ClassifyTechNewsStory(stories []StoryDetail, profile UserProfile) []int {
+func ClassifyTechNewsStory(arm Arm, stories []StoryDetail, profile UserProfile) []int {
 	var classificationPrompt claudeapi.PromptInput
-	classificationPrompt.System = constructPromptSystemAttribute(profile)
+	classificationPrompt.System = constructPromptSystemAttribute(arm, profile)
 	classificationPrompt.Message = constructPromptMessageAttribute(stories)
 
 	var response claudeapi.Response

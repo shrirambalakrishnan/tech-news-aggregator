@@ -26,13 +26,41 @@
 	- We can make use of full README contents of all repos
 	- Evaluate how this Approach 3 performs against Approach 1 and Approach 2
 
+## Run modes (arms)
+
+The classifier flow is selected **explicitly** by an `arm` argument — nothing on
+disk decides it. Each arm picks exactly one `UserProfile` initialization and one
+classification flow, and errors (non-zero exit) when its required data is absent
+rather than silently falling back.
+
+| arm | UserProfile | Flow | Errors if… |
+|-----|-------------|------|------------|
+| `0` | none | generic/static "technical CS" prompt | never — production default |
+| `1` | `summary` + `interests` from `profile/user_context.json` | interests injected into the prompt | the distilled JSON is missing (run `prebuild` first) |
+| `2` | corpus chunks *(future)* | RAG embedding flow *(future)* | always — **stubbed**, not implemented this iteration |
+
+```bash
+go run .                # normal run, arm 0 (default; cron-safe)
+go run . 1              # normal run, arm 1 (interests) — needs prebuild's JSON
+go run . eval 0         # eval under arm 0 (arm is REQUIRED for eval)
+go run . eval 1         # eval under arm 1
+go run . prebuild       # regenerate profile/user_context.json (see below)
+```
+
+Production defaults to **arm 0** so the unattended `tech-news-run.sh` path stays
+cron-safe. That is a deliberate regression from the previous implicit
+interests-when-present behaviour; making the arm user-configurable is a future
+iteration. `eval` requires an explicit arm (no default) so an eval meant for one
+arm can never silently score another.
+
 ## Prebuild step (user context)
 
 `go run . prebuild` fetches the configured user's GitHub READMEs (`GITHUB_USERNAME`,
 see `.env.example`), asks the LLM to extract an interest profile, and writes it to
 `profile/user_context.json` (a regenerable, git-ignored cache with a
-`generated_at` timestamp). The normal `go run .` run reads that file. Run prebuild
-occasionally — **not** on the 4-hourly schedule — since it is the expensive path.
+`generated_at` timestamp). **Arm 1** reads that file (and errors if it's absent);
+arm 0 ignores it. Run prebuild occasionally — **not** on the 4-hourly schedule —
+since it is the expensive path.
 
 ## Cost model: raw READMEs vs. prebuilt context
 

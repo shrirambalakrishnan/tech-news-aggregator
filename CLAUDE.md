@@ -9,10 +9,12 @@ A Go CLI that fetches HackerNews front-page stories, uses the Claude API to clas
 ## Commands
 
 ```bash
-go run .                        # build + run (requires ANTHROPIC_API_KEY in env)
+go run .                        # build + run, arm 0 (requires ANTHROPIC_API_KEY in env)
+go run . 1                      # run under arm 1 (interests; needs prebuild's JSON)
+go run . eval 0                 # eval under a specific arm (arm is REQUIRED for eval)
 go test ./...                   # run all tests
 go test ./hackernews_classifier/ -run TestClassifyTechNewsStory   # single test, single package
-./tech-news-run.sh              # production entrypoint: pulls API key from macOS Keychain, then `go run .`
+./tech-news-run.sh              # production entrypoint: pulls API key from macOS Keychain, then `go run .` (arm 0)
 ```
 
 CI (`.github/workflows/test.yml`) runs `go test ./...` on pushes/PRs to `main`. There is no linter configured.
@@ -21,10 +23,22 @@ CI (`.github/workflows/test.yml`) runs `go test ./...` on pushes/PRs to `main`. 
 
 ## Architecture
 
-Pipeline (entry point `main.go` → `GetMyHackerNewsStories()`):
+**Explicit arm selection (issue #11).** The classification flow is chosen by an
+explicit `arm` argument, not by what happens to be on disk. `main.parseArm`
+validates the CLI arg; `arm 0` = generic/static prompt with no profile (the
+production default, kept for cron-safety), `arm 1` = interests injected from the
+distilled JSON, `arm 2` = RAG (stubbed, always errors this iteration). Both `main`
+and `evalHarness` own a `buildProfileForArm(arm)` that initializes the arm's
+`UserProfile` and **errors (non-zero exit) when the arm's data is missing** — it
+does *not* fail soft to arm 0. `ClassifyTechNewsStory(arm, stories, profile)` and
+`ConstructPromptSystemAttribute(arm, profile)` switch on the arm, so the profile's
+emptiness no longer selects the flow. Normal runs default the arm to 0; `eval`
+requires an explicit arm so a run meant for one arm can't silently score another.
+
+Pipeline (entry point `main.go` → `GetMyHackerNewsStories(arm)`):
 
 1. **`main` package** (repo root): `hackernews.go` fetches stories from the Algolia HN API (`hn.algolia.com`, `tags=front_page`) **page by page** and **cumulates** them into one slice — `GetHackerNewsStories()` loops `HACKERNEWS_NUM_PAGES_TO_QUERY` pages, each returning `HACKERNEWS_HITS_PER_PAGE` hits (defaults: 1 page × 30 = 30 stories) — then filters them. `main.go` writes results to `stories.md`. `apiHelper.go` holds a generic `PostJSON` helper (currently unused — staged for a future refactor of the per-package HTTP code).
-2. **`hackernews_classifier` package**: builds the system + message prompts and calls Claude to classify a `[]StoryDetail` (id + title), returning the IDs deemed technical. **All cumulated stories go to Claude in a single API call per run** — `FilterHackerNewsStoriesByTitle` flattens the whole fetched slice into one `ClassifyTechNewsStory` call; it is *not* batched by page. The Algolia page size (`HACKERNEWS_HITS_PER_PAGE`) only controls how many stories are *fetched*, not the Claude batch size; with the defaults the single call happens to carry ~30 stories. `ConstructPromptSystemAttribute(UserProfile)` injects the user's interests when a profile is supplied, and falls back to a hardcoded static ruleset (`staticClassificationPrompt`) when the profile is empty. `UserProfile` is the classifier's own slim input contract (signal fields only) — `main` maps `profile.UserContext` into it, so the classifier never imports `profile`.
+2. **`hackernews_classifier` package**: builds the system + message prompts and calls Claude to classify a `[]StoryDetail` (id + title), returning the IDs deemed technical. **All cumulated stories go to Claude in a single API call per run** — `FilterHackerNewsStoriesByTitle` flattens the whole fetched slice into one `ClassifyTechNewsStory` call; it is *not* batched by page. The Algolia page size (`HACKERNEWS_HITS_PER_PAGE`) only controls how many stories are *fetched*, not the Claude batch size; with the defaults the single call happens to carry ~30 stories. `ConstructPromptSystemAttribute(arm, UserProfile)` returns the hardcoded static ruleset (`staticClassificationPrompt`) for `arm 0` and the interests-injected prompt for `arm 1` — the arm selects the flow, not the profile's emptiness. `UserProfile` is the classifier's own slim input contract (signal fields only) — `main` maps `profile.UserContext` into it (in `buildProfileForArm`), so the classifier never imports `profile`.
 3. **`claudeapi` package**: thin Anthropic Messages API client (`POST /v1/messages`). Model and request shape are hardcoded here (`ANTHROPIC_MODEL_NAME`).
 4. **`profile` package**: fetches a GitHub user's repos and their READMEs (`github.go`), then extracts an interest profile from them via the LLM and reads/writes `profile/user_context.json` (`context.go`). Wired in as a **prebuild step**: `go run . prebuild` calls `ExtractGithubProfile()` and exits; the normal run skips it.
 
@@ -58,6 +72,8 @@ This keeps tests free of network calls. When you add a function that calls anoth
 
 **Step 3 (done):** `ConstructPromptSystemAttribute` now takes a `hackernews_classifier.UserProfile` (`summary` + `interests`) and builds an interest-driven prompt, falling back to the static ruleset when the profile `IsEmpty()`. `FilterHackerNewsStoriesByTitle` (in `hackernews.go`) calls `loadUserContext` (DI var → `profile.LoadUserContext`), maps `profile.UserContext` → `UserProfile`, and fails soft (empty profile → static rules) when the artifact is missing. To preserve the downward-only dependency rule, the classifier defines `UserProfile` itself rather than importing `profile`; `main` owns the mapping and drops the provenance metadata.
 
+> **Superseded by issue #11 (explicit arm selection):** the fail-soft behaviour above (missing artifact → empty profile → static rules) is now only how **arm 0** behaves *by choice*. Flow selection is explicit via the `arm` argument; `buildProfileForArm` **errors instead of failing soft** when arm 1's JSON is missing (see the Architecture section). `ConstructPromptSystemAttribute`/`ClassifyTechNewsStory` now take the arm and switch on it rather than on `IsEmpty()`.
+
 ### Design decisions (settled in discussion)
 
 - **Artifact format is a hybrid**, not bare keywords: a prose `summary` (for Claude to reason/generalize over) **plus** a flat `interests` array (inspectable/diffable), wrapped with metadata (`schema_version`, `generated_at`, `source`, `model`) for provenance and forward-compatibility. There is no useful "binary" form — everything stored is text the model reads.
@@ -68,6 +84,8 @@ This keeps tests free of network calls. When you add a function that calls anoth
 ## Eval harness (branch `feature/7-eval-harness`)
 
 Offline eval of the classifier against a hand-labelled dataset, to measure classifier-vs-ground-truth quality (and, later, the prebuilt-vs-raw fidelity gap from the roadmap).
+
+`RunEval(arm)` runs **exactly one arm** (issue #11): the CLI requires it (`go run . eval <arm>`, no default), and `evalHarness.buildProfileForArm` errors — non-zero exit — when arm 1's distilled JSON is missing, so an eval meant for arm 1 never silently scores arm 0.
 
 - **Labelled data:** `evalHarness/hn-responses-labelled.json` — an array of `{objectID, story_id, title, url, label}` where `label` is `1` (relevant) or `0` (not). 341 stories, 35 positive (~10% prevalence). **Git-ignored** (backup kept in notes; a fixture, not source of truth).
 - **Metrics (phase 1 — deliberately bare minimum):** the `Metrics` struct reports only the confusion matrix (`TP/FP/TN/FN`), **precision**, **recall**, and the **false-positive / false-negative title lists**. That is the irreducible set to evaluate correctly: the four cells carry every count, precision/recall cover the two independent failure modes, and the lists show *what* to fix. Accuracy, F1, and the imbalance-aware extras (MCC, balanced accuracy, specificity, NPV, FPR, FNR, kappa, F2) were intentionally **cut** — accuracy actively misleads on 90/10 data, and the rest are good-to-have summaries/complements (some, e.g. FPR/FNR, are literal restatements of recall/specificity). **eval v2:** re-add a single robust score (F1 first, then MCC/balanced accuracy) when *comparing* classifier variants (static vs profile vs RAG), which is when one ranking number earns its keep. `Evaluate(predictedIDs, dataset)` is pure (no I/O) so the metric math is unit-tested with hand-computed numbers.
