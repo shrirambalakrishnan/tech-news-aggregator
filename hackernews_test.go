@@ -109,7 +109,7 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		classifyTechNewsStoryCallCount := 0
 		classifyTechNewsStoryCallParameters := [][]hackernews_classifier.StoryDetail{}
 		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
-		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
+		classifyTechNewsStory = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
 			classifyTechNewsStoryCallCount++
 			classifyTechNewsStoryCallParameters = append(classifyTechNewsStoryCallParameters, stories)
 			classifyTechNewsStoryCallProfile = userProfile
@@ -117,11 +117,13 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		}
 		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-		FilterHackerNewsStoriesByTitle([]HackerNewsStory{
+		if _, err := FilterHackerNewsStoriesByTitle(hackernews_classifier.ArmInterests, []HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
 			{StoryId: 2, Title: "story2", Author: "Author1"},
 			{StoryId: 3, Title: "story3", Author: "Author3"},
-		})
+		}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
 		if classifyTechNewsStoryCallCount != 1 {
 			t.Fatalf("classifyTechNewsStory call count is invalid, expected 1, got %d", classifyTechNewsStoryCallCount)
@@ -156,16 +158,19 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		}
 		defer func() { loadUserContext = profile.LoadUserContext }()
 
-		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
+		classifyTechNewsStory = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
 			return []int{1, 3}
 		}
 		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-		filteredStories := FilterHackerNewsStoriesByTitle([]HackerNewsStory{
+		filteredStories, err := FilterHackerNewsStoriesByTitle(hackernews_classifier.ArmInterests, []HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
 			{StoryId: 2, Title: "story2", Author: "Author1"},
 			{StoryId: 3, Title: "story3", Author: "Author3"},
 		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
 		expectedFilteredStories := []HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
@@ -184,26 +189,60 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 
 	})
 
-	t.Run("fails soft to an empty profile when user context is unavailable", func(t *testing.T) {
+	t.Run("ArmGeneric passes an empty profile and never loads user context", func(t *testing.T) {
+
+		loadUserContextCalled := false
+		loadUserContext = func(path string) (profile.UserContext, error) {
+			loadUserContextCalled = true
+			return profile.UserContext{Summary: "backend work"}, nil
+		}
+		defer func() { loadUserContext = profile.LoadUserContext }()
+
+		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
+		classifyTechNewsStory = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
+			classifyTechNewsStoryCallProfile = userProfile
+			return []int{}
+		}
+		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
+
+		if _, err := FilterHackerNewsStoriesByTitle(hackernews_classifier.ArmGeneric, []HackerNewsStory{
+			{StoryId: 1, Title: "story1", Author: "Author1"},
+		}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if loadUserContextCalled {
+			t.Fatal("ArmGeneric should not load user context")
+		}
+		if !classifyTechNewsStoryCallProfile.IsEmpty() {
+			t.Fatalf("expected an empty profile under ArmGeneric, got %+v", classifyTechNewsStoryCallProfile)
+		}
+
+	})
+
+	t.Run("ArmInterests errors (and does not classify) when user context is unavailable", func(t *testing.T) {
 
 		loadUserContext = func(path string) (profile.UserContext, error) {
 			return profile.UserContext{}, errors.New("file not found")
 		}
 		defer func() { loadUserContext = profile.LoadUserContext }()
 
-		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
-		classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
-			classifyTechNewsStoryCallProfile = userProfile
+		classifyCalled := false
+		classifyTechNewsStory = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
+			classifyCalled = true
 			return []int{}
 		}
 		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-		FilterHackerNewsStoriesByTitle([]HackerNewsStory{
+		_, err := FilterHackerNewsStoriesByTitle(hackernews_classifier.ArmInterests, []HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
 		})
 
-		if !classifyTechNewsStoryCallProfile.IsEmpty() {
-			t.Fatalf("expected an empty profile on load failure, got %+v", classifyTechNewsStoryCallProfile)
+		if err == nil {
+			t.Fatal("expected an error when arm 1 profile is unavailable, got nil")
+		}
+		if classifyCalled {
+			t.Fatal("classifier must not run when the arm's profile is unavailable")
 		}
 
 	})
@@ -226,14 +265,22 @@ func TestGetMyHackerNewsStories(t *testing.T) {
 		}
 		defer func() { getHackerNewsStories = GetHackerNewsStories }()
 
-		filterHackerNewsStoriesByTitle = func(stories []HackerNewsStory) []HackerNewsStory {
+		var filterHackerNewsStoriesByTitleCallArm hackernews_classifier.Arm
+		filterHackerNewsStoriesByTitle = func(arm hackernews_classifier.Arm, stories []HackerNewsStory) ([]HackerNewsStory, error) {
+			filterHackerNewsStoriesByTitleCallArm = arm
 			filterHackerNewsStoriesByTitleCallParameters = append(filterHackerNewsStoriesByTitleCallParameters, stories)
 			filterHackerNewsStoriesByTitleCalled = true
-			return []HackerNewsStory{}
+			return []HackerNewsStory{}, nil
 		}
 		defer func() { filterHackerNewsStoriesByTitle = FilterHackerNewsStoriesByTitle }()
 
-		GetMyHackerNewsStories()
+		if _, err := GetMyHackerNewsStories(hackernews_classifier.ArmInterests); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if filterHackerNewsStoriesByTitleCallArm != hackernews_classifier.ArmInterests {
+			t.Fatalf("expected arm %d forwarded to filter, got %d", hackernews_classifier.ArmInterests, filterHackerNewsStoriesByTitleCallArm)
+		}
 
 		if !getHackerNewsStoriesCalled {
 			t.Fatal("GetHackerNewsStories was not called")

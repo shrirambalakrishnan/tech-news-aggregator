@@ -10,6 +10,10 @@ import (
 	"github.com/shrirambalakrishnan/tech-news/profile"
 )
 
+// errArmNotImplemented backs the arm 2 stub. Its own variable so tests can
+// assert on it without matching the message text.
+var errArmNotImplemented = fmt.Errorf("arm 2 (RAG): corpus chunks unavailable - not implemented")
+
 // LABELLED_DATA_FILE is the hand-labelled dataset (git-ignored). Path is
 // relative to the repo root, where `go run . eval` executes.
 const LABELLED_DATA_FILE = "evalHarness/hn-responses-labelled.json"
@@ -26,21 +30,26 @@ var EVAL_BATCH_SIZE = 30
 var classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory
 var loadUserContext = profile.LoadUserContext
 
-// RunEval is the `go run . eval` entrypoint: load the labelled data, run the
-// classifier over it in batches exactly as production would, score the
-// predictions against the human labels, and print the report to the console.
-func RunEval() {
+// RunEval is the `go run . eval <arm>` entrypoint: load the labelled data, run
+// the classifier over it in batches exactly as production would under the given
+// arm, score the predictions against the human labels, and print the report to
+// the console. It runs exactly one arm.
+func RunEval(arm hackernews_classifier.Arm) {
 	dataset, err := loadLabelledData(LABELLED_DATA_FILE)
 	if err != nil {
 		log.Fatal("eval: failed to load labelled data: ", err)
 	}
 	log.Printf("eval: loaded %d labelled stories from %s", len(dataset), LABELLED_DATA_FILE)
 
-	// Mirror the production classify path: load the prebuilt interest profile and
-	// fail soft to the static rules if it's missing (prebuild may not have run).
-	userProfile := loadProfileOrEmpty()
+	// Build the profile the arm requires. Unlike the old fail-soft path, a
+	// missing artifact under arm 1 is fatal - the eval must not silently score
+	// arm 0 (see issue #11 acceptance criteria).
+	userProfile, err := buildProfileForArm(arm)
+	if err != nil {
+		log.Fatal("eval: ", err)
+	}
 
-	predictedIDs := classifyInBatches(dataset, userProfile)
+	predictedIDs := classifyInBatches(arm, dataset, userProfile)
 
 	metrics := Evaluate(predictedIDs, dataset)
 
@@ -61,25 +70,39 @@ func loadLabelledData(path string) ([]LabelledStory, error) {
 	return dataset, nil
 }
 
-// loadProfileOrEmpty returns the user's interest profile, or an empty profile
-// (which makes the classifier fall back to the static rules) when the prebuilt
-// artifact is missing. Same fail-soft behaviour as FilterHackerNewsStoriesByTitle.
-func loadProfileOrEmpty() hackernews_classifier.UserProfile {
-	userContext, err := loadUserContext(profile.USER_CONTEXT_FILE)
-	if err != nil {
-		log.Println("eval: user context unavailable, using static classification rules:", err)
-		return hackernews_classifier.UserProfile{}
-	}
-	return hackernews_classifier.UserProfile{
-		Summary:   userContext.Summary,
-		Interests: userContext.Interests,
+// buildProfileForArm initializes the UserProfile the chosen arm requires,
+// erroring (rather than failing soft) when the arm's data is missing so the eval
+// exits non-zero instead of silently scoring a different arm. Mirrors main's
+// buildProfileForArm.
+//
+//   - ArmGeneric   -> empty profile; the generic flow needs no user data.
+//   - ArmInterests -> profile from the distilled JSON; errors if it's absent.
+//   - ArmRAG       -> stubbed this iteration; always errors.
+func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.UserProfile, error) {
+	switch arm {
+	case hackernews_classifier.ArmGeneric:
+		return hackernews_classifier.UserProfile{}, nil
+	case hackernews_classifier.ArmInterests:
+		userContext, err := loadUserContext(profile.USER_CONTEXT_FILE)
+		if err != nil {
+			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 1 (interests): distilled user profile unavailable at %s (run `go run . prebuild`): %w", profile.USER_CONTEXT_FILE, err)
+		}
+		return hackernews_classifier.UserProfile{
+			Summary:   userContext.Summary,
+			Interests: userContext.Interests,
+		}, nil
+	case hackernews_classifier.ArmRAG:
+		return hackernews_classifier.UserProfile{}, errArmNotImplemented
+	default:
+		return hackernews_classifier.UserProfile{}, fmt.Errorf("unknown arm: %d", arm)
 	}
 }
 
 // classifyInBatches walks the dataset in EVAL_BATCH_SIZE chunks, classifies each
-// chunk in one Claude call, and concatenates the predicted-relevant IDs. This is
-// the "batch 30" run shape: each call is the same size production sends.
-func classifyInBatches(dataset []LabelledStory, userProfile hackernews_classifier.UserProfile) []int {
+// chunk in one Claude call under the given arm, and concatenates the
+// predicted-relevant IDs. This is the "batch 30" run shape: each call is the
+// same size production sends.
+func classifyInBatches(arm hackernews_classifier.Arm, dataset []LabelledStory, userProfile hackernews_classifier.UserProfile) []int {
 	var predicted []int
 
 	for start := 0; start < len(dataset); start += EVAL_BATCH_SIZE {
@@ -95,7 +118,7 @@ func classifyInBatches(dataset []LabelledStory, userProfile hackernews_classifie
 			stories = append(stories, hackernews_classifier.StoryDetail{Id: s.StoryID, Title: s.Title})
 		}
 
-		ids := classifyTechNewsStory(stories, userProfile)
+		ids := classifyTechNewsStory(arm, stories, userProfile)
 		predicted = append(predicted, ids...)
 
 		log.Printf("eval: classified batch %d-%d (%d stories) -> %d flagged relevant",
