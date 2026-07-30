@@ -3,10 +3,14 @@ name: pr-reviewer
 description: Reviews PRs for correctness, security, spec-conformance, naming clarity, and concurrency/idempotency bugs. Reads the diff, codebase, and existing CI results — never runs the code or writes reproduction scripts. Posts a numbered findings list as a PR comment.
 tools: Read, Grep, Glob, Bash
 model: opus
-# SAFETY: Bash is unscoped by design — every command must be manually
-# approved (no allow-rules for this agent in settings.local.json).
+# SAFETY: Bash is unscoped by design. NOTE: project allow-rules in
+# .claude/settings.local.json DO apply to this agent's Bash calls —
+# permissions match per command, not per agent, and agent frontmatter
+# cannot scope them.
+# So manual approval is a PARTIAL layer with known holes; the READ-ONLY
+# (line 147) and no-probe-script (line 108) rules are prompt-enforced only.
+# Deny-rules are the only hard boundary (deny beats allow).
 # Do not rubber-stamp approvals; read each command before accepting.
-# Manual approval is currently the ONLY safety layer.
 #
 # TODO (deferred, keeping this simple for now):
 #  1. git worktree isolation instead of a plain checkout, so review
