@@ -109,14 +109,14 @@ func TestClassifyInBatches(t *testing.T) {
 	defer func() { EVAL_BATCH_SIZE = originalBatch }()
 
 	var batchSizes []int
-	classifyTechNewsStory = func(stories []hackernews_classifier.StoryDetail, _ hackernews_classifier.UserProfile) []int {
+	classifyTechNewsStory = func(_ hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail, _ hackernews_classifier.UserProfile) []int {
 		batchSizes = append(batchSizes, len(stories))
 		// Pretend the classifier flags the first story of every batch.
 		return []int{stories[0].Id}
 	}
 	defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-	predicted := classifyInBatches(dataset, hackernews_classifier.UserProfile{})
+	predicted := classifyInBatches(hackernews_classifier.ArmGeneric, dataset, hackernews_classifier.UserProfile{})
 
 	// 5 stories at batch size 2 -> chunks of 2, 2, 1.
 	wantSizes := []int{2, 2, 1}

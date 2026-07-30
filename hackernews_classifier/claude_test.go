@@ -35,7 +35,7 @@ func TestUserProfileIsEmpty(t *testing.T) {
 
 func TestConstructPromptSystemAttribute(t *testing.T) {
 
-	t.Run("falls back to the static prompt for an empty profile", func(t *testing.T) {
+	t.Run("returns the static prompt for ArmGeneric", func(t *testing.T) {
 
 		expectedResponse := `You are a Hacker News story classifier.
 
@@ -61,20 +61,20 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 	Example response: [123, 456, 789]
 	`
 
-		systemPromptResponse := ConstructPromptSystemAttribute(UserProfile{})
+		systemPromptResponse := ConstructPromptSystemAttribute(ArmGeneric, UserProfile{})
 
 		if systemPromptResponse != expectedResponse {
 			t.Fatalf("expected system prompt to be %s, got %s", expectedResponse, systemPromptResponse)
 		}
 	})
 
-	t.Run("injects the profile and drops the static rules when populated", func(t *testing.T) {
+	t.Run("injects the profile and drops the static rules for ArmInterests", func(t *testing.T) {
 		profile := UserProfile{
 			Summary:   "Repositories focus on distributed systems and clock ordering.",
 			Interests: []string{"distributed systems", "Spanner", "message brokers"},
 		}
 
-		got := ConstructPromptSystemAttribute(profile)
+		got := ConstructPromptSystemAttribute(ArmInterests, profile)
 
 		if !strings.Contains(got, profile.Summary) {
 			t.Fatalf("expected dynamic prompt to contain the summary, got %s", got)
@@ -89,14 +89,14 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 		}
 	})
 
-	t.Run("prefers retrieved corpus chunks over the profile summary and interests", func(t *testing.T) {
+	t.Run("builds the prompt from corpus chunks alone for ArmRAG", func(t *testing.T) {
 		profile := UserProfile{
 			Summary:      "Repositories focus on distributed systems.",
 			Interests:    []string{"Spanner"},
 			CorpusChunks: []string{"TrueTime bounds clock uncertainty", "Raft elects a single leader"},
 		}
 
-		got := ConstructPromptSystemAttribute(profile)
+		got := ConstructPromptSystemAttribute(ArmRAG, profile)
 
 		for i, chunk := range profile.CorpusChunks {
 			if !strings.Contains(got, chunk) {
@@ -108,6 +108,38 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 		}
 		if strings.Contains(got, "Programming languages, compilers, interpreters") {
 			t.Fatalf("expected rag prompt to omit the static ruleset, got %s", got)
+		}
+	})
+
+	// The arm - not the presence of CorpusChunks - selects the flow, so a
+	// profile carrying both must still yield exactly its arm's prompt.
+	t.Run("ignores corpus chunks for ArmInterests", func(t *testing.T) {
+		profile := UserProfile{
+			Summary:      "Repositories focus on distributed systems.",
+			Interests:    []string{"Spanner"},
+			CorpusChunks: []string{"TrueTime bounds clock uncertainty"},
+		}
+
+		got := ConstructPromptSystemAttribute(ArmInterests, profile)
+
+		if strings.Contains(got, profile.CorpusChunks[0]) {
+			t.Fatalf("expected the interests prompt to omit corpus chunks, got %s", got)
+		}
+		if !strings.Contains(got, profile.Summary) {
+			t.Fatalf("expected the interests prompt to contain the summary, got %s", got)
+		}
+	})
+
+	t.Run("ignores corpus chunks for ArmGeneric", func(t *testing.T) {
+		profile := UserProfile{CorpusChunks: []string{"TrueTime bounds clock uncertainty"}}
+
+		got := ConstructPromptSystemAttribute(ArmGeneric, profile)
+
+		if strings.Contains(got, profile.CorpusChunks[0]) {
+			t.Fatalf("expected the static prompt to omit corpus chunks, got %s", got)
+		}
+		if !strings.Contains(got, "Programming languages, compilers, interpreters") {
+			t.Fatalf("expected the static ruleset, got %s", got)
 		}
 	})
 
@@ -139,7 +171,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 
 	t.Run("calls constructPromptSystemAttribute once", func(t *testing.T) {
 		callCount := 0
-		constructPromptSystemAttribute = func(profile UserProfile) string {
+		constructPromptSystemAttribute = func(_ Arm, profile UserProfile) string {
 			callCount++
 			return "system prompt"
 		}
@@ -154,7 +186,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		}
 		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
-		ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}}, UserProfile{})
+		ClassifyTechNewsStory(ArmGeneric, []StoryDetail{{Id: 1, Title: "Story1"}}, UserProfile{})
 
 		if callCount != 1 {
 			t.Fatalf("expected constructPromptSystemAttribute to be called once, got %d", callCount)
@@ -162,7 +194,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 	})
 
 	t.Run("calls constructPromptMessageAttribute with all stories", func(t *testing.T) {
-		constructPromptSystemAttribute = func(profile UserProfile) string { return "system prompt" }
+		constructPromptSystemAttribute = func(_ Arm, profile UserProfile) string { return "system prompt" }
 		defer func() { constructPromptSystemAttribute = ConstructPromptSystemAttribute }()
 
 		var calledWith []StoryDetail
@@ -179,7 +211,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
 		input := []StoryDetail{{Id: 1, Title: "Story1"}, {Id: 2, Title: "Story2"}, {Id: 3, Title: "Story3"}, {Id: 10, Title: "Story10"}}
-		ClassifyTechNewsStory(input, UserProfile{})
+		ClassifyTechNewsStory(ArmGeneric, input, UserProfile{})
 
 		if len(calledWith) != len(input) {
 			t.Fatalf("expected constructPromptMessageAttribute called with %d stories, got %d", len(input), len(calledWith))
@@ -187,7 +219,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 	})
 
 	t.Run("calls claudeMessageApiCall with composed prompt", func(t *testing.T) {
-		constructPromptSystemAttribute = func(profile UserProfile) string { return "system prompt" }
+		constructPromptSystemAttribute = func(_ Arm, profile UserProfile) string { return "system prompt" }
 		defer func() { constructPromptSystemAttribute = ConstructPromptSystemAttribute }()
 
 		constructPromptMessageAttribute = func(stories []StoryDetail) string { return "message prompt" }
@@ -201,7 +233,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		}
 		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
-		ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}}, UserProfile{})
+		ClassifyTechNewsStory(ArmGeneric, []StoryDetail{{Id: 1, Title: "Story1"}}, UserProfile{})
 
 		expected := claudeapi.PromptInput{System: "system prompt", Message: "message prompt"}
 		if calledWith != expected {
@@ -210,7 +242,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 	})
 
 	t.Run("returns classified story IDs from Claude response", func(t *testing.T) {
-		constructPromptSystemAttribute = func(profile UserProfile) string { return "system prompt" }
+		constructPromptSystemAttribute = func(_ Arm, profile UserProfile) string { return "system prompt" }
 		defer func() { constructPromptSystemAttribute = ConstructPromptSystemAttribute }()
 
 		constructPromptMessageAttribute = func(stories []StoryDetail) string { return "message prompt" }
@@ -222,7 +254,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		}
 		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
-		result := ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}, {Id: 2, Title: "Story2"}, {Id: 3, Title: "Story3"}}, UserProfile{})
+		result := ClassifyTechNewsStory(ArmGeneric, []StoryDetail{{Id: 1, Title: "Story1"}, {Id: 2, Title: "Story2"}, {Id: 3, Title: "Story3"}}, UserProfile{})
 
 		if len(result) != 2 || result[0] != 1 || result[1] != 3 {
 			t.Fatalf("expected [1 3], got %v", result)
@@ -236,7 +268,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		}
 		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
-		result := ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}}, UserProfile{})
+		result := ClassifyTechNewsStory(ArmGeneric, []StoryDetail{{Id: 1, Title: "Story1"}}, UserProfile{})
 
 		if len(result) != 0 {
 			t.Fatalf("expected empty slice, got %v", result)
@@ -245,7 +277,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 
 	t.Run("forwards the user profile to constructPromptSystemAttribute", func(t *testing.T) {
 		var calledWith UserProfile
-		constructPromptSystemAttribute = func(profile UserProfile) string {
+		constructPromptSystemAttribute = func(_ Arm, profile UserProfile) string {
 			calledWith = profile
 			return "system prompt"
 		}
@@ -258,7 +290,7 @@ func TestClassifyTechNewsStory(t *testing.T) {
 		defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
 
 		want := UserProfile{Summary: "backend work", Interests: []string{"Go", "Spanner"}}
-		ClassifyTechNewsStory([]StoryDetail{{Id: 1, Title: "Story1"}}, want)
+		ClassifyTechNewsStory(ArmGeneric, []StoryDetail{{Id: 1, Title: "Story1"}}, want)
 
 		if calledWith.Summary != want.Summary || len(calledWith.Interests) != len(want.Interests) {
 			t.Fatalf("expected profile %+v forwarded, got %+v", want, calledWith)

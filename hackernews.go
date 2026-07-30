@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -86,7 +87,39 @@ func GetHackerNewsStoriesInPage(page int) []HackerNewsStory {
 	return storiesResponse.Hits
 }
 
-func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory {
+// buildProfileForArm initializes the UserProfile the chosen arm requires, and
+// errors (rather than failing soft) when the arm's data is missing - so the
+// caller can exit non-zero instead of silently running a different arm.
+//
+//   - ArmGeneric   -> empty profile; the generic flow needs no user data.
+//   - ArmInterests -> profile from the distilled JSON; errors if it's absent.
+//   - ArmRAG       -> empty here on purpose; its CorpusChunks are query-dependent
+//     and get retrieved per batch (see FilterHackerNewsStoriesByTitle).
+func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.UserProfile, error) {
+	switch arm {
+	case hackernews_classifier.ArmGeneric:
+		return hackernews_classifier.UserProfile{}, nil
+	case hackernews_classifier.ArmInterests:
+		userContext, err := loadUserContext(profile.USER_CONTEXT_FILE)
+		if err != nil {
+			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 1 (interests): distilled user profile unavailable at %s (run `go run . prebuild`): %w", profile.USER_CONTEXT_FILE, err)
+		}
+		return hackernews_classifier.UserProfile{
+			Summary:   userContext.Summary,
+			Interests: userContext.Interests,
+		}, nil
+	case hackernews_classifier.ArmRAG:
+		// Nothing to load up front: the RAG context is retrieved per batch,
+		// keyed by that batch's story titles, which only
+		// FilterHackerNewsStoriesByTitle has. A missing index surfaces there
+		// as an error, so the arm still fails loudly rather than failing soft.
+		return hackernews_classifier.UserProfile{}, nil
+	default:
+		return hackernews_classifier.UserProfile{}, fmt.Errorf("unknown arm: %d", arm)
+	}
+}
+
+func FilterHackerNewsStoriesByTitle(arm hackernews_classifier.Arm, stories []HackerNewsStory) ([]HackerNewsStory, error) {
 	storiesWithTitle := []hackernews_classifier.StoryDetail{}
 	for _, story := range stories {
 		storiesWithTitle = append(storiesWithTitle, hackernews_classifier.StoryDetail{
@@ -96,35 +129,33 @@ func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory
 	}
 	filteredStories := []HackerNewsStory{}
 
-	// Load the prebuilt interest profile and fail soft to the static rules if the
-	// artifact is missing (prebuild may not have run).
-	var userProfile hackernews_classifier.UserProfile
-	if userContext, err := loadUserContext(profile.USER_CONTEXT_FILE); err != nil {
-		log.Println("user context unavailable, using static classification rules:", err)
-	} else {
-		userProfile = hackernews_classifier.UserProfile{
-			Summary:   userContext.Summary,
-			Interests: userContext.Interests,
-		}
+	// Build the profile the arm requires. An error here (e.g. arm 1 with no
+	// distilled JSON) propagates up so the run exits non-zero rather than
+	// silently classifying under a different flow.
+	userProfile, err := buildProfileForArm(arm)
+	if err != nil {
+		return nil, err
 	}
 
-	// Approach 3 (RAG): retrieve the corpus chunks most similar to this batch
-	// and hand them to the classifier, which prefers them over Summary/Interests.
-	// The batch's titles double as the retrieval query — the known
-	// confirmation-bias trade-off (see CLAUDE.md, retrieval-key problem). Fail
-	// soft: if the index is missing (embed step not run) or retrieval fails, the
-	// profile loaded above / static rules still apply.
-	titles := make([]string, 0, len(storiesWithTitle))
-	for _, story := range storiesWithTitle {
-		titles = append(titles, story.Title)
-	}
-	if chunks, err := loadRagContext(strings.Join(titles, "\n"), rag.RETRIEVAL_TOP_K); err != nil {
-		log.Println("rag context unavailable, using profile/static rules:", err)
-	} else {
+	// Arm 2 (RAG): retrieve the corpus chunks most similar to this batch. The
+	// batch's titles double as the retrieval query — the known
+	// confirmation-bias trade-off (see CLAUDE.md, retrieval-key problem).
+	// Unlike the pre-#11 code this does NOT fail soft: a run asked for arm 2
+	// must exit non-zero when the index is missing rather than quietly
+	// classifying under arm 0's static rules.
+	if arm == hackernews_classifier.ArmRAG {
+		titles := make([]string, 0, len(storiesWithTitle))
+		for _, story := range storiesWithTitle {
+			titles = append(titles, story.Title)
+		}
+		chunks, err := loadRagContext(strings.Join(titles, "\n"), rag.RETRIEVAL_TOP_K)
+		if err != nil {
+			return nil, fmt.Errorf("arm 2 (RAG): corpus retrieval failed (run `go run . embed`): %w", err)
+		}
 		userProfile.CorpusChunks = chunks
 	}
 
-	filteredStoryIds := classifyTechNewsStory(storiesWithTitle, userProfile)
+	filteredStoryIds := classifyTechNewsStory(arm, storiesWithTitle, userProfile)
 	log.Println("filteredStoryIds = ", filteredStoryIds)
 
 	for _, story := range stories {
@@ -135,17 +166,20 @@ func FilterHackerNewsStoriesByTitle(stories []HackerNewsStory) []HackerNewsStory
 		}
 	}
 
-	return filteredStories
+	return filteredStories, nil
 }
 
-func GetMyHackerNewsStories() []HackerNewsStory {
+func GetMyHackerNewsStories(arm hackernews_classifier.Arm) ([]HackerNewsStory, error) {
 	log.Println("GetMyHackerNewsStories...")
 
 	stories := getHackerNewsStories()
 	log.Println("stories = ", stories)
 
-	filteredStories := filterHackerNewsStoriesByTitle(stories)
+	filteredStories, err := filterHackerNewsStoriesByTitle(arm, stories)
+	if err != nil {
+		return nil, err
+	}
 	log.Println("filteredStories = ", filteredStories)
 
-	return filteredStories
+	return filteredStories, nil
 }

@@ -9,6 +9,24 @@ import (
 	"github.com/shrirambalakrishnan/tech-news/claudeapi"
 )
 
+// Arm selects, explicitly, which classification flow runs. It replaces the old
+// implicit selection (which branched on whether a profile was present on disk).
+// The caller decides the arm; nothing on disk overrides it. See issue #11.
+type Arm int
+
+const (
+	// ArmGeneric classifies against the hardcoded static "technical computer
+	// science" ruleset with no user profile. Production default.
+	ArmGeneric Arm = 0
+	// ArmInterests classifies against the user's distilled interest profile
+	// (summary + interests) injected into the prompt.
+	ArmInterests Arm = 1
+	// ArmRAG classifies against raw corpus excerpts retrieved for the current
+	// batch of stories (embeddings over profile/corpus). The caller fills
+	// UserProfile.CorpusChunks before classifying.
+	ArmRAG Arm = 2
+)
+
 type StoryDetail struct {
 	Id    int
 	Title string
@@ -22,16 +40,17 @@ type StoryDetail struct {
 type UserProfile struct {
 	Summary   string
 	Interests []string
-	// CorpusChunks carries Approach 3 (RAG) context: corpus excerpts retrieved
-	// for the current batch of stories. When present it takes precedence over
-	// Summary/Interests in prompt construction, so each eval arm stays pure —
-	// a prompt is built from exactly one context source.
+	// CorpusChunks carries ArmRAG context: corpus excerpts retrieved for the
+	// current batch of stories. Only ArmRAG reads it - the arm, not this
+	// field's emptiness, selects the prompt, so each arm builds from exactly
+	// one context source and the arms stay comparable in the eval.
 	CorpusChunks []string
 }
 
-// IsEmpty reports whether the profile carries no usable signal, in which case
-// callers fall back to the static classification rules. Centralized so adding
-// fields updates the fail-soft check in one place.
+// IsEmpty reports whether the profile carries no usable signal. Since flow
+// selection is now explicit (via Arm), callers use this as a defensive check -
+// e.g. to reject an ArmInterests run whose loaded profile turned out empty.
+// Centralized so adding signal fields updates the check in one place.
 func (p UserProfile) IsEmpty() bool {
 	return p.Summary == "" && len(p.Interests) == 0 && len(p.CorpusChunks) == 0
 }
@@ -40,19 +59,27 @@ var constructPromptSystemAttribute = ConstructPromptSystemAttribute
 var constructPromptMessageAttribute = ConstructPromptMessageAttribute
 var claudeMessageApiCall = claudeapi.ClaudeMessageApiCall
 
-// ConstructPromptSystemAttribute builds the classifier system prompt, choosing
-// the richest context source available: retrieved corpus chunks (Approach 3 /
-// RAG) over the distilled profile (Approach 2) over the static ruleset
-// (Approach 1). Each prompt uses exactly one source so the approaches stay
-// comparable in the eval.
-func ConstructPromptSystemAttribute(profile UserProfile) string {
-	if len(profile.CorpusChunks) > 0 {
+// ConstructPromptSystemAttribute builds the classifier system prompt for the
+// chosen arm: ArmGeneric returns the static "technical computer science"
+// ruleset, ArmInterests classifies against the user's distilled interest
+// profile, and ArmRAG classifies against corpus excerpts retrieved for the
+// current batch. The arm drives the flow explicitly - neither the profile's
+// emptiness nor the presence of corpus chunks selects it - so each prompt is
+// built from exactly one context source and the arms stay comparable.
+func ConstructPromptSystemAttribute(arm Arm, profile UserProfile) string {
+	switch arm {
+	case ArmInterests:
+		return interestsClassificationPrompt(profile)
+	case ArmRAG:
 		return ragClassificationPrompt(profile.CorpusChunks)
-	}
-	if profile.IsEmpty() {
+	default:
 		return staticClassificationPrompt()
 	}
+}
 
+// interestsClassificationPrompt builds the ArmInterests system prompt: the
+// distilled summary + interests injected as the reader's profile.
+func interestsClassificationPrompt(profile UserProfile) string {
 	interests := strings.Join(profile.Interests, ", ")
 
 	return `You are a Hacker News story classifier that selects stories matching a specific reader's technical interests.
@@ -77,10 +104,10 @@ Example response: [123, 456, 789]
 `
 }
 
-// ragClassificationPrompt builds the Approach 3 system prompt: instead of a
+// ragClassificationPrompt builds the ArmRAG system prompt: instead of a
 // distilled profile it presents raw corpus excerpts retrieved for this batch
 // and asks Claude to infer the reader's interests from them. The negative
-// rules and the output contract deliberately mirror the profile prompt so the
+// rules and the output contract deliberately mirror the interests prompt so the
 // eval arms differ only in their context source.
 func ragClassificationPrompt(chunks []string) string {
 	excerpts := ""
@@ -143,9 +170,9 @@ func ConstructPromptMessageAttribute(stories []StoryDetail) string {
 	return prompt
 }
 
-func ClassifyTechNewsStory(stories []StoryDetail, profile UserProfile) []int {
+func ClassifyTechNewsStory(arm Arm, stories []StoryDetail, profile UserProfile) []int {
 	var classificationPrompt claudeapi.PromptInput
-	classificationPrompt.System = constructPromptSystemAttribute(profile)
+	classificationPrompt.System = constructPromptSystemAttribute(arm, profile)
 	classificationPrompt.Message = constructPromptMessageAttribute(stories)
 
 	var response claudeapi.Response
