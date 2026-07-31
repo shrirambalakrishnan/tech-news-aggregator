@@ -21,7 +21,7 @@
 	  and compares the classified sets (precision/recall/overlap), so the fidelity
 	  gap is measured rather than assumed. Use it to tune the extraction prompt to
 	  capture exactly the signals the classifier relies on.
-- `Approach 3` - Use RAG [Pending 🟠] — **experiential: does retrieval actually beat distillation here?**
+- `Approach 3` - Use RAG [Completed ✅] — **experiential: does retrieval actually beat distillation here?**
 	- **Goal:** learn RAG hands-on *and* measure whether retrieval beats the
 	  distilled Approach 2 profile — don't assume it. The question is falsifiable via
 	  the eval harness (precision/recall vs Approach 1 & 2). "Distillation still wins"
@@ -48,9 +48,17 @@
 	- **Embed step done:** `go run . embed` chunks `profile/corpus/` (git-ignored; ~10
 	  blogs + ~10 READMEs + ~10 white papers) and embeds it via Voyage into
 	  `profile/corpus_index.json` (see *Embeddings step* below).
-	- **Next step:** retrieval — embed each batch as a query, cosine top-k against the
-	  index, inject the retrieved chunks into the classify prompt, then evaluate
-	  Approach 3 against Approach 1 and Approach 2 with the existing harness.
+	- **Retrieval step done:** each batch's story titles are embedded as one query,
+	  cosine-ranked top-k against the index, and the retrieved chunks are inlined into
+	  the classify prompt. Live in **both** the scheduled run (`go run . 2`) and the
+	  eval (`go run . eval 2`) — see *Run modes* and *Retrieval step* below.
+	- **Eval done:** `go run . eval 2` scores arm 2 against the same hand-labelled
+	  dataset as arms 0 and 1, retrieving per batch exactly as production does. Numbers
+	  under *Eval Execution results*.
+	- **Follow-ups (eval v2, when the comparison needs to be sharper):** add F1 as a
+	  single cross-arm ranking score, run each arm k times for mean ± stddev (the LLM is
+	  non-deterministic, so one run is a point estimate), and keep watching
+	  **FP/precision** for the confirmation-bias failure mode recorded above.
 
 ## Run modes (arms)
 
@@ -63,14 +71,17 @@ rather than silently falling back.
 |-----|-------------|------|------------|
 | `0` | none | generic/static "technical CS" prompt | never — production default |
 | `1` | `summary` + `interests` from `profile/user_context.json` | interests injected into the prompt | the distilled JSON is missing (run `prebuild` first) |
-| `2` | corpus chunks *(future)* | RAG embedding flow *(future)* | always — **stubbed**, not implemented this iteration |
+| `2` | top-k corpus excerpts retrieved for the batch being classified | excerpts inlined into the prompt as evidence of the reader's interests | `profile/corpus_index.json` is missing, or retrieval fails (run `embed` first) |
 
 ```bash
 go run .                # normal run, arm 0 (default; cron-safe)
 go run . 1              # normal run, arm 1 (interests) — needs prebuild's JSON
+go run . 2              # normal run, arm 2 (RAG) — needs embed's corpus index
 go run . eval 0         # eval under arm 0 (arm is REQUIRED for eval)
 go run . eval 1         # eval under arm 1
+go run . eval 2         # eval under arm 2 — slow on Voyage's free tier, see below
 go run . prebuild       # regenerate profile/user_context.json (see below)
+go run . embed          # regenerate profile/corpus_index.json (see below)
 ```
 
 Production defaults to **arm 0** so the unattended `tech-news-run.sh` path stays
@@ -115,8 +126,41 @@ requests/min and 10K tokens/min** (the 200M free-token allowance still applies, 
 ~150K-token corpus is effectively free). The embedder paces around this — token-bounded
 batches, an inter-request delay, and 429 retry-with-backoff — so a full run takes
 **~20 min**. Adding a payment method on the Voyage dashboard lifts the throttle (still
-free under 200M tokens); the pacing then just becomes harmless overhead. Retrieval and
-wiring into the classifier are the **next** step, not yet built.
+free under 200M tokens); the pacing then just becomes harmless overhead.
+
+## Retrieval step (Approach 3 / RAG) — what `arm 2` does at run time
+
+Arm 2 replaces the distilled profile with corpus excerpts retrieved for the
+stories being classified right now:
+
+1. **Query.** The batch's ~30 story titles are joined with newlines into a single
+   query. One query per batch, not per title — 30 paced Voyage calls would be far
+   slower, and the batch prompt pools the excerpts anyway.
+2. **Embed.** The query goes through `voyageapi.EmbedQuery`, which sets
+   `input_type: "query"`. Queries must **not** go through the document path:
+   Voyage embeds the two retrieval sides differently.
+3. **Rank.** Cosine similarity against every chunk in `profile/corpus_index.json`;
+   the top 5 (`RETRIEVAL_TOP_K`) chunk texts win.
+4. **Classify.** Those 5 excerpts are inlined verbatim into the system prompt as
+   evidence of the reader's interests, in place of arm 1's summary + interests.
+
+Only the retrieved handful is sent — never the whole index. Inlining all ~150K
+corpus tokens every 4 hours is exactly the cost Approach 3 exists to avoid (that
+would be long-context stuffing, a different experiment).
+
+**No fail-soft.** A missing index or a failed retrieval **exits non-zero**; arm 2
+never quietly degrades into arm 1 or arm 0. Publishing numbers labelled "RAG" that
+were really the static ruleset is the failure mode explicit arm selection exists
+to prevent. Run `go run . embed` first — and note the index is git-ignored, so a
+fresh clone has to rebuild it.
+
+> ⚠️ **`go run . eval 2` is slow on Voyage's free tier.** The eval retrieves once
+> per batch — 12 back-to-back queries — but query embedding has no inter-request
+> pacing (production only ever makes *one* retrieval call per run, so it never
+> needed it). On the 3 RPM free tier, calls 4+ get 429'd and self-pace via linear
+> backoff (30s, 60s, …). The run completes and the numbers are unaffected, but
+> expect several minutes of waiting. Adding a payment method on the Voyage
+> dashboard removes it entirely.
 
 ## Cost model: raw READMEs vs. prebuilt context
 
@@ -158,7 +202,7 @@ The project needs two secret API keys and one non-secret config value:
 | Name | Type | Used by | Where it lives |
 |------|------|---------|----------------|
 | `ANTHROPIC_API_KEY` | secret | `claudeapi` — every Claude call (classify + profile extraction) | macOS Keychain |
-| `VOYAGE_API_KEY` | secret | Approach 3 RAG — embedding the `profile/corpus` chunks via Voyage AI *(stored now; not yet wired in code)* | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | `voyageapi` — embedding the `profile/corpus` chunks (`go run . embed`) and each arm 2 retrieval query | macOS Keychain |
 | `GITHUB_USERNAME` | non-secret | `profile` prebuild — whose repo READMEs to fetch | `.env` (see `.env.example`) |
 
 #### API keys (macOS Keychain)
@@ -177,7 +221,7 @@ security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w
 security find-generic-password -a "$USER" -s "VOYAGE_API_KEY"    -w
 ```
 
-> **Note:** `tech-news-run.sh` currently exports only `ANTHROPIC_API_KEY`. The Approach 3 embeddings step will export `VOYAGE_API_KEY` the same way once it's built — the key is stored in the Keychain ahead of time so that step is ready to wire up.
+> **Note:** `tech-news-run.sh` exports only `ANTHROPIC_API_KEY`, which is all the scheduled arm 0 run needs. `VOYAGE_API_KEY` is required by `go run . embed` **and** by any arm 2 run (each retrieval embeds its query), so export it manually for those — see *Embeddings step*. If you ever switch the scheduled run to arm 2, the runner has to export it too.
 
 ## Runner script
 
@@ -216,7 +260,20 @@ rm ~/Library/LaunchAgents/com.technews.plist
 
 ## Eval Execution results
 
-### Run1 - based on user github profile context
+### Eval 0 - Based on generic prompt
+
+-- Confusion matrix --
+  TP (hit, flagged & relevant)        = 14
+  FP (false alarm, flagged but dud)   = 120
+  TN (correct skip)                   = 186
+  FN (miss, skipped but relevant)     = 21
+
+-- Metrics --
+  Precision (of flagged, % good)      = 0.1045
+  Recall    (of good, % caught)       = 0.4000
+
+### Eval 1 - Based on user github profile context
+
 -- Confusion matrix --
 	TP (hit, flagged & relevant)        = 4
 	FP (false alarm, flagged but dud)   = 8
@@ -227,14 +284,16 @@ rm ~/Library/LaunchAgents/com.technews.plist
 	Precision (of flagged, % good)      = 0.3333
 	Recall    (of good, % caught)       = 0.1143
 
-### Run2 - based on generic CS promt
+### Eval 2 - Based on interests obtained from user data (using RAG)
+
+================ EVAL REPORT ================
 
 -- Confusion matrix --
   TP (hit, flagged & relevant)        = 14
-  FP (false alarm, flagged but dud)   = 120
-  TN (correct skip)                   = 186
+  FP (false alarm, flagged but dud)   = 70
+  TN (correct skip)                   = 236
   FN (miss, skipped but relevant)     = 21
 
 -- Metrics --
-  Precision (of flagged, % good)      = 0.1045
+  Precision (of flagged, % good)      = 0.1667
   Recall    (of good, % caught)       = 0.4000

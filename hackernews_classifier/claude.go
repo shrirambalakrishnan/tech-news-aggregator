@@ -201,7 +201,7 @@ func ClassifyTechNewsStory(arm Arm, stories []StoryDetail, profile UserProfile) 
 	log.Println("techNewsStoryIdsStr = ", techNewsStoryIdsStr)
 
 	techNewsStoryIds := []int{}
-	err = json.Unmarshal([]byte(techNewsStoryIdsStr), &techNewsStoryIds)
+	err = json.Unmarshal([]byte(extractJSONArray(techNewsStoryIdsStr)), &techNewsStoryIds)
 	if err != nil {
 		log.Println("Error unmarshalling tech news story IDs:", err)
 		return []int{}
@@ -209,4 +209,28 @@ func ClassifyTechNewsStory(arm Arm, stories []StoryDetail, profile UserProfile) 
 
 	log.Println("techNewsStoryIds = ", techNewsStoryIds)
 	return techNewsStoryIds
+}
+
+// extractJSONArray pulls the JSON array out of a model response, tolerating the
+// wrappers every prompt here asks Claude NOT to emit: ```json fences, a "Here
+// are the IDs:" preamble, trailing commentary.
+//
+// The instruction alone is not enough. Arm 2 in particular inlines corpus
+// excerpts - READMEs and papers full of fenced code - and the model mirrors that
+// formatting back, so it wraps the array in a fence and the strict Unmarshal
+// fails. A parse failure is *silent* here (the caller logs and returns no IDs),
+// which in the eval reads as recall 0 rather than as an error - so tolerating
+// the wrapper is worth more than being strict about it.
+//
+// Slicing first '[' to last ']' rather than stripping fences specifically keeps
+// this indifferent to which wrapper the model picked. The IDs are a flat array,
+// so there is no nesting to confuse the bounds. Returns "" when there is no
+// array at all, which fails the Unmarshal exactly as before.
+func extractJSONArray(text string) string {
+	start := strings.Index(text, "[")
+	end := strings.LastIndex(text, "]")
+	if start < 0 || end < start {
+		return ""
+	}
+	return text[start : end+1]
 }

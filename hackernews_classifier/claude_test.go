@@ -298,3 +298,64 @@ func TestClassifyTechNewsStory(t *testing.T) {
 	})
 
 }
+
+// TestExtractJSONArray covers the wrappers Claude actually emits despite the
+// prompt forbidding them. The fenced case is not hypothetical: it is what broke
+// an arm 2 run (the RAG prompt inlines fenced corpus excerpts, and the model
+// mirrors that formatting back).
+func TestExtractJSONArray(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare array", "[1, 2, 3]", "[1, 2, 3]"},
+		{"json fence", "```json\n[49112232, 49111176]\n```", "[49112232, 49111176]"},
+		{"bare fence", "```\n[1,2]\n```", "[1,2]"},
+		{"prose preamble", "Here are the relevant story IDs:\n[7, 8]", "[7, 8]"},
+		{"trailing commentary", "[7, 8]\nThese match the reader's interests.", "[7, 8]"},
+		{"empty array", "```json\n[]\n```", "[]"},
+		{"surrounding whitespace", "\n\n  [1]  \n", "[1]"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := extractJSONArray(c.in); got != c.want {
+				t.Errorf("extractJSONArray(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+
+	// No array at all -> "", which fails the caller's Unmarshal exactly as an
+	// unparseable response did before. Silently succeeding with no IDs would be
+	// indistinguishable from "nothing was relevant".
+	t.Run("no array present", func(t *testing.T) {
+		for _, in := range []string{"", "I could not classify these stories.", "[1, 2"} {
+			if got := extractJSONArray(in); got != "" {
+				t.Errorf("extractJSONArray(%q) = %q, want \"\"", in, got)
+			}
+		}
+	})
+}
+
+// A fenced response must reach the caller as IDs, not as the empty slice a parse
+// failure produces - in the eval those two outcomes look identical (recall 0).
+func TestClassifyTechNewsStoryParsesFencedResponse(t *testing.T) {
+	claudeMessageApiCall = func(prompt claudeapi.PromptInput, response *claudeapi.Response) error {
+		response.Content = []claudeapi.ResponseContent{{Type: "text", Text: "```json\n[49112232, 49111176]\n```"}}
+		return nil
+	}
+	defer func() { claudeMessageApiCall = claudeapi.ClaudeMessageApiCall }()
+
+	ids := ClassifyTechNewsStory(ArmRAG, []StoryDetail{{Id: 1, Title: "story1"}}, UserProfile{RetrievedExcerpts: []string{"chunk"}})
+
+	want := []int{49112232, 49111176}
+	if len(ids) != len(want) {
+		t.Fatalf("ids = %v, want %v", ids, want)
+	}
+	for i, id := range want {
+		if ids[i] != id {
+			t.Fatalf("ids = %v, want %v", ids, want)
+		}
+	}
+}
