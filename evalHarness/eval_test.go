@@ -5,8 +5,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
-	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 const epsilon = 1e-9
@@ -118,7 +118,7 @@ func TestClassifyInBatches(t *testing.T) {
 	}
 	defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-	predicted, err := classifyInBatches(hackernews_classifier.ArmGeneric, dataset, hackernews_classifier.UserProfile{})
+	predicted, err := classifyInBatches(hackernews_classifier.ArmGeneric, dataset)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,10 +146,12 @@ func TestClassifyInBatches(t *testing.T) {
 	}
 }
 
-// TestClassifyInBatchesArmRAG covers arm 2's defining property: retrieval is
-// re-run per batch, keyed by that batch's own titles, so the eval reproduces
-// production's retrieval shape rather than reusing one global context.
-func TestClassifyInBatchesArmRAG(t *testing.T) {
+// TestClassifyInBatchesPerBatchProfile covers the property that makes the eval
+// transferable: the profile is rebuilt per batch from that batch's own stories -
+// the same thing FilterHackerNewsStoriesByTitle does per run - so arm 2's
+// retrieval is keyed by the batch's titles instead of one global context reused
+// across the dataset. Per-arm construction itself lives in armcontext.
+func TestClassifyInBatchesPerBatchProfile(t *testing.T) {
 	dataset := []LabelledStory{
 		{StoryID: 1, Title: "a"}, {StoryID: 2, Title: "b"},
 		{StoryID: 3, Title: "c"}, {StoryID: 4, Title: "d"},
@@ -159,14 +161,15 @@ func TestClassifyInBatchesArmRAG(t *testing.T) {
 	EVAL_BATCH_SIZE = 2
 	defer func() { EVAL_BATCH_SIZE = originalBatch }()
 
-	var gotQueries []string
-	var gotK int
-	loadRagContext = func(query string, k int) ([]string, error) {
-		gotQueries = append(gotQueries, query)
-		gotK = k
-		return []string{"chunk for " + query}, nil
+	var gotBatches [][]hackernews_classifier.StoryDetail
+	buildProfileForArm = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail) (hackernews_classifier.UserProfile, error) {
+		if arm != hackernews_classifier.ArmRAG {
+			t.Errorf("builder called with arm %d, want ArmRAG", arm)
+		}
+		gotBatches = append(gotBatches, stories)
+		return hackernews_classifier.UserProfile{RetrievedExcerpts: []string{"chunk for " + stories[0].Title}}, nil
 	}
-	defer func() { loadRagContext = rag.RetrieveContext }()
+	defer func() { buildProfileForArm = armcontext.BuildProfile }()
 
 	var gotChunks [][]string
 	classifyTechNewsStory = func(_ hackernews_classifier.Arm, _ []hackernews_classifier.StoryDetail, p hackernews_classifier.UserProfile) []int {
@@ -175,44 +178,46 @@ func TestClassifyInBatchesArmRAG(t *testing.T) {
 	}
 	defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-	if _, err := classifyInBatches(hackernews_classifier.ArmRAG, dataset, hackernews_classifier.UserProfile{}); err != nil {
+	if _, err := classifyInBatches(hackernews_classifier.ArmRAG, dataset); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Each batch retrieves with only its own titles, newline-joined - the same
-	// query construction FilterHackerNewsStoriesByTitle uses in production.
-	wantQueries := []string{"a\nb", "c\nd"}
-	if len(gotQueries) != len(wantQueries) {
-		t.Fatalf("retrieved %d times, want %d (queries %q)", len(gotQueries), len(wantQueries), gotQueries)
+	// The builder sees each batch alone, never the whole dataset.
+	wantBatches := [][]string{{"a", "b"}, {"c", "d"}}
+	if len(gotBatches) != len(wantBatches) {
+		t.Fatalf("built %d profiles, want %d", len(gotBatches), len(wantBatches))
 	}
-	for i, want := range wantQueries {
-		if gotQueries[i] != want {
-			t.Errorf("batch %d query = %q, want %q", i, gotQueries[i], want)
+	for i, want := range wantBatches {
+		if len(gotBatches[i]) != len(want) {
+			t.Fatalf("batch %d = %v, want titles %v", i, gotBatches[i], want)
+		}
+		for j, title := range want {
+			if gotBatches[i][j].Title != title {
+				t.Errorf("batch %d story %d = %q, want %q", i, j, gotBatches[i][j].Title, title)
+			}
 		}
 	}
-	if gotK != rag.RETRIEVAL_TOP_K {
-		t.Errorf("k = %d, want RETRIEVAL_TOP_K (%d)", gotK, rag.RETRIEVAL_TOP_K)
-	}
 
-	// Each batch must be classified with its own retrieved chunks, not a
-	// carried-over set from the previous batch.
-	for i, want := range wantQueries {
-		if len(gotChunks[i]) != 1 || gotChunks[i][0] != "chunk for "+want {
-			t.Errorf("batch %d classified with chunks %v, want the chunks retrieved for %q", i, gotChunks[i], want)
+	// Each batch is classified with its own context, not one carried over from
+	// the previous batch.
+	for i, batch := range wantBatches {
+		want := "chunk for " + batch[0]
+		if len(gotChunks[i]) != 1 || gotChunks[i][0] != want {
+			t.Errorf("batch %d classified with %v, want %q", i, gotChunks[i], want)
 		}
 	}
 }
 
-// A missing corpus index must abort the eval. Scoring on regardless would
-// publish arm 0's numbers under arm 2's name - the failure issue #11 exists to
-// prevent.
-func TestClassifyInBatchesArmRAGRetrievalFailureAborts(t *testing.T) {
+// A missing artifact (no corpus index, no distilled profile) must abort the eval.
+// Scoring on regardless would publish one arm's numbers under another's name -
+// the failure issue #11 exists to prevent.
+func TestClassifyInBatchesBuildFailureAborts(t *testing.T) {
 	dataset := []LabelledStory{{StoryID: 1, Title: "a"}, {StoryID: 2, Title: "b"}}
 
-	loadRagContext = func(query string, k int) ([]string, error) {
-		return nil, errors.New("corpus index unavailable")
+	buildProfileForArm = func(_ hackernews_classifier.Arm, _ []hackernews_classifier.StoryDetail) (hackernews_classifier.UserProfile, error) {
+		return hackernews_classifier.UserProfile{}, errors.New("corpus index unavailable")
 	}
-	defer func() { loadRagContext = rag.RetrieveContext }()
+	defer func() { buildProfileForArm = armcontext.BuildProfile }()
 
 	classifyCalled := false
 	classifyTechNewsStory = func(_ hackernews_classifier.Arm, _ []hackernews_classifier.StoryDetail, _ hackernews_classifier.UserProfile) []int {
@@ -221,36 +226,14 @@ func TestClassifyInBatchesArmRAGRetrievalFailureAborts(t *testing.T) {
 	}
 	defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-	predicted, err := classifyInBatches(hackernews_classifier.ArmRAG, dataset, hackernews_classifier.UserProfile{})
+	predicted, err := classifyInBatches(hackernews_classifier.ArmRAG, dataset)
 	if err == nil {
-		t.Fatal("expected an error when retrieval fails, got nil")
+		t.Fatal("expected an error when the arm's context cannot be built, got nil")
 	}
 	if predicted != nil {
 		t.Errorf("expected no predictions on failure, got %v", predicted)
 	}
 	if classifyCalled {
-		t.Error("classifier must not run when arm 2 retrieval fails")
-	}
-}
-
-// Arms 0 and 1 must never touch retrieval - the arm alone selects the flow.
-func TestClassifyInBatchesNonRAGArmsSkipRetrieval(t *testing.T) {
-	dataset := []LabelledStory{{StoryID: 1, Title: "a"}}
-
-	loadRagContext = func(query string, k int) ([]string, error) {
-		t.Fatal("non-RAG arms must not retrieve corpus context")
-		return nil, nil
-	}
-	defer func() { loadRagContext = rag.RetrieveContext }()
-
-	classifyTechNewsStory = func(_ hackernews_classifier.Arm, _ []hackernews_classifier.StoryDetail, _ hackernews_classifier.UserProfile) []int {
-		return []int{}
-	}
-	defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
-
-	for _, arm := range []hackernews_classifier.Arm{hackernews_classifier.ArmGeneric, hackernews_classifier.ArmInterests} {
-		if _, err := classifyInBatches(arm, dataset, hackernews_classifier.UserProfile{}); err != nil {
-			t.Fatalf("arm %d: unexpected error: %v", arm, err)
-		}
+		t.Error("classifier must not run when the arm's context is unavailable")
 	}
 }

@@ -2,15 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 
+	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
-	"github.com/shrirambalakrishnan/tech-news/profile"
-	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 const (
@@ -27,8 +24,7 @@ var getHackerNewsStoriesInPage = GetHackerNewsStoriesInPage
 var filterHackerNewsStoriesByTitle = FilterHackerNewsStoriesByTitle
 var classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory
 var getHackerNewsStories = GetHackerNewsStories
-var loadUserContext = profile.LoadUserContext
-var loadRagContext = rag.RetrieveContext
+var buildProfileForArm = armcontext.BuildProfile
 
 type HackerNewsStory struct {
 	Author    string `json:"author"`
@@ -87,39 +83,6 @@ func GetHackerNewsStoriesInPage(page int) []HackerNewsStory {
 	return storiesResponse.Hits
 }
 
-// buildProfileForArm initializes the UserProfile the chosen arm requires, and
-// errors (rather than failing soft) when the arm's data is missing - so the
-// caller can exit non-zero instead of silently running a different arm.
-//
-//   - ArmGeneric   -> empty profile; the generic flow needs no user data.
-//   - ArmInterests -> profile from the distilled JSON; errors if it's absent.
-//   - ArmRAG       -> empty here on purpose; its RetrievedExcerpts are the result
-//     of a retrieval keyed by the batch's titles, which don't exist yet at this
-//     point, so they get filled in FilterHackerNewsStoriesByTitle.
-func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.UserProfile, error) {
-	switch arm {
-	case hackernews_classifier.ArmGeneric:
-		return hackernews_classifier.UserProfile{}, nil
-	case hackernews_classifier.ArmInterests:
-		userContext, err := loadUserContext(profile.USER_CONTEXT_FILE)
-		if err != nil {
-			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 1 (interests): distilled user profile unavailable at %s (run `go run . prebuild`): %w", profile.USER_CONTEXT_FILE, err)
-		}
-		return hackernews_classifier.UserProfile{
-			Summary:   userContext.Summary,
-			Interests: userContext.Interests,
-		}, nil
-	case hackernews_classifier.ArmRAG:
-		// Nothing to load up front: the RAG context is retrieved per batch,
-		// keyed by that batch's story titles, which only
-		// FilterHackerNewsStoriesByTitle has. A missing index surfaces there
-		// as an error, so the arm still fails loudly rather than failing soft.
-		return hackernews_classifier.UserProfile{}, nil
-	default:
-		return hackernews_classifier.UserProfile{}, fmt.Errorf("unknown arm: %d", arm)
-	}
-}
-
 func FilterHackerNewsStoriesByTitle(arm hackernews_classifier.Arm, stories []HackerNewsStory) ([]HackerNewsStory, error) {
 	storiesWithTitle := []hackernews_classifier.StoryDetail{}
 	for _, story := range stories {
@@ -130,35 +93,13 @@ func FilterHackerNewsStoriesByTitle(arm hackernews_classifier.Arm, stories []Hac
 	}
 	filteredStories := []HackerNewsStory{}
 
-	// Build the profile the arm requires. An error here (e.g. arm 1 with no
-	// distilled JSON) propagates up so the run exits non-zero rather than
-	// silently classifying under a different flow.
-	userProfile, err := buildProfileForArm(arm)
+	// Build the context this arm classifies against - including, under arm 2,
+	// the excerpts retrieved for these very stories. Any failure (arm 1 without
+	// its distilled JSON, arm 2 without its index) propagates up so the run
+	// exits non-zero instead of silently classifying under a different flow.
+	userProfile, err := buildProfileForArm(arm, storiesWithTitle)
 	if err != nil {
 		return nil, err
-	}
-
-	// Arm 2 (RAG): retrieve the RETRIEVAL_TOP_K corpus chunks most similar to
-	// this batch and hand only those to the classifier - they get inlined
-	// verbatim into the prompt, so this is deliberately a handful of excerpts
-	// and never the whole index. The batch's titles double as the retrieval
-	// query — the known confirmation-bias trade-off (see CLAUDE.md,
-	// retrieval-key problem). That query is why retrieval happens here and not
-	// in buildProfileForArm: the titles only exist at this point.
-	//
-	// Unlike the pre-#11 code this does NOT fail soft: a run asked for arm 2
-	// must exit non-zero when the index is missing rather than quietly
-	// classifying under arm 0's static rules.
-	if arm == hackernews_classifier.ArmRAG {
-		titles := make([]string, 0, len(storiesWithTitle))
-		for _, story := range storiesWithTitle {
-			titles = append(titles, story.Title)
-		}
-		excerpts, err := loadRagContext(strings.Join(titles, "\n"), rag.RETRIEVAL_TOP_K)
-		if err != nil {
-			return nil, fmt.Errorf("arm 2 (RAG): corpus retrieval failed (run `go run . embed`): %w", err)
-		}
-		userProfile.RetrievedExcerpts = excerpts
 	}
 
 	filteredStoryIds := classifyTechNewsStory(arm, storiesWithTitle, userProfile)

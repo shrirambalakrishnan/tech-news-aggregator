@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 
+	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
-	"github.com/shrirambalakrishnan/tech-news/profile"
-	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 // LABELLED_DATA_FILE is the hand-labelled dataset (git-ignored). Path is
@@ -25,9 +23,10 @@ var EVAL_BATCH_SIZE = 30
 
 // DI seams (same function-variable convention as the rest of the repo): tests
 // swap these for fakes so the runner never touches the network or the disk.
+// buildProfileForArm is the SAME function production calls - the eval is only
+// transferable if both feed the classifier identical context.
 var classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory
-var loadUserContext = profile.LoadUserContext
-var loadRagContext = rag.RetrieveContext
+var buildProfileForArm = armcontext.BuildProfile
 
 // RunEval is the `go run . eval <arm>` entrypoint: load the labelled data, run
 // the classifier over it in batches exactly as production would under the given
@@ -40,15 +39,7 @@ func RunEval(arm hackernews_classifier.Arm) {
 	}
 	log.Printf("eval: loaded %d labelled stories from %s", len(dataset), LABELLED_DATA_FILE)
 
-	// Build the profile the arm requires. Unlike the old fail-soft path, a
-	// missing artifact under arm 1 is fatal - the eval must not silently score
-	// arm 0 (see issue #11 acceptance criteria).
-	userProfile, err := buildProfileForArm(arm)
-	if err != nil {
-		log.Fatal("eval: ", err)
-	}
-
-	predictedIDs, err := classifyInBatches(arm, dataset, userProfile)
+	predictedIDs, err := classifyInBatches(arm, dataset)
 	if err != nil {
 		log.Fatal("eval: ", err)
 	}
@@ -72,49 +63,18 @@ func loadLabelledData(path string) ([]LabelledStory, error) {
 	return dataset, nil
 }
 
-// buildProfileForArm initializes the UserProfile the chosen arm requires,
-// erroring (rather than failing soft) when the arm's data is missing so the eval
-// exits non-zero instead of silently scoring a different arm. Mirrors main's
-// buildProfileForArm.
-//
-//   - ArmGeneric   -> empty profile; the generic flow needs no user data.
-//   - ArmInterests -> profile from the distilled JSON; errors if it's absent.
-//   - ArmRAG       -> empty here on purpose; its RetrievedExcerpts are the result
-//     of a retrieval keyed by the batch's titles, which don't exist yet at this
-//     point, so they get filled per batch in classifyInBatches.
-func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.UserProfile, error) {
-	switch arm {
-	case hackernews_classifier.ArmGeneric:
-		return hackernews_classifier.UserProfile{}, nil
-	case hackernews_classifier.ArmInterests:
-		userContext, err := loadUserContext(profile.USER_CONTEXT_FILE)
-		if err != nil {
-			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 1 (interests): distilled user profile unavailable at %s (run `go run . prebuild`): %w", profile.USER_CONTEXT_FILE, err)
-		}
-		return hackernews_classifier.UserProfile{
-			Summary:   userContext.Summary,
-			Interests: userContext.Interests,
-		}, nil
-	case hackernews_classifier.ArmRAG:
-		// Nothing to load up front: the RAG context is retrieved per batch,
-		// keyed by that batch's titles, so only classifyInBatches can build it.
-		// A missing index surfaces there as an error, so the arm still fails
-		// loudly rather than silently scoring arm 0. Mirrors main's arm 2 case.
-		return hackernews_classifier.UserProfile{}, nil
-	default:
-		return hackernews_classifier.UserProfile{}, fmt.Errorf("unknown arm: %d", arm)
-	}
-}
-
 // classifyInBatches walks the dataset in EVAL_BATCH_SIZE chunks, classifies each
 // chunk in one Claude call under the given arm, and concatenates the
 // predicted-relevant IDs. This is the "batch 30" run shape: each call is the
 // same size production sends.
 //
-// Under ArmRAG the profile is rebuilt per batch, because retrieval is keyed by
-// the batch's own titles - exactly as production does it in
-// FilterHackerNewsStoriesByTitle, so the measured numbers stay transferable.
-func classifyInBatches(arm hackernews_classifier.Arm, dataset []LabelledStory, userProfile hackernews_classifier.UserProfile) ([]int, error) {
+// The profile is built per batch, from that batch's own stories, exactly as
+// FilterHackerNewsStoriesByTitle does per run - so arm 2's retrieval is keyed by
+// the batch's titles rather than reusing one global context, and the measured
+// numbers stay transferable. Arms 0 and 1 rebuild an identical profile each time
+// (a re-read of a small local JSON, next to a Claude call - not worth
+// special-casing to keep one dispatch point).
+func classifyInBatches(arm hackernews_classifier.Arm, dataset []LabelledStory) ([]int, error) {
 	var predicted []int
 
 	for start := 0; start < len(dataset); start += EVAL_BATCH_SIZE {
@@ -130,19 +90,13 @@ func classifyInBatches(arm hackernews_classifier.Arm, dataset []LabelledStory, u
 			stories = append(stories, hackernews_classifier.StoryDetail{Id: s.StoryID, Title: s.Title})
 		}
 
-		// Arm 2: retrieve this batch's excerpts. The copy is deliberate -
-		// RetrievedExcerpts is per-call state (its query is this batch's own
-		// titles), so it must not leak into the next batch's profile the way
-		// Summary/Interests legitimately do. Errors abort the eval rather than
-		// falling back - a run labelled "RAG" must never be scored against the
-		// static ruleset (issue #11).
-		batchProfile := userProfile
-		if arm == hackernews_classifier.ArmRAG {
-			excerpts, err := retrieveForBatch(stories)
-			if err != nil {
-				return nil, fmt.Errorf("arm 2 (RAG): batch %d-%d: %w (run `go run . embed`)", start, end-1, err)
-			}
-			batchProfile.RetrievedExcerpts = excerpts
+		// Errors abort the eval rather than falling back to a lesser arm: a run
+		// labelled "RAG" must never be scored against the static ruleset (issue
+		// #11). The first batch fails before any Claude call, so a missing
+		// artifact costs nothing.
+		batchProfile, err := buildProfileForArm(arm, stories)
+		if err != nil {
+			return nil, fmt.Errorf("batch %d-%d: %w", start, end-1, err)
 		}
 
 		ids := classifyTechNewsStory(arm, stories, batchProfile)
@@ -153,15 +107,4 @@ func classifyInBatches(arm hackernews_classifier.Arm, dataset []LabelledStory, u
 	}
 
 	return predicted, nil
-}
-
-// retrieveForBatch builds the arm 2 retrieval query the same way production
-// does - the batch's titles joined by newline - and returns the top-k excerpts.
-// Kept separate so the query-construction rule lives in one place per package.
-func retrieveForBatch(stories []hackernews_classifier.StoryDetail) ([]string, error) {
-	titles := make([]string, 0, len(stories))
-	for _, story := range stories {
-		titles = append(titles, story.Title)
-	}
-	return loadRagContext(strings.Join(titles, "\n"), rag.RETRIEVAL_TOP_K)
 }
