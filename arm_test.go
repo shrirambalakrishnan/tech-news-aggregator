@@ -81,7 +81,7 @@ func TestBuildProfileForArm(t *testing.T) {
 		}
 		defer func() { loadUserContext = profile.LoadUserContext }()
 
-		// Arm 2's CorpusChunks are query-dependent, so they are filled per
+		// Arm 2's RetrievedExcerpts are query-dependent, so they are filled per
 		// batch in FilterHackerNewsStoriesByTitle, not here. A missing index
 		// errors there (covered in hackernews_test.go), so the arm still fails
 		// loudly rather than failing soft.

@@ -23,7 +23,7 @@ const (
 	ArmInterests Arm = 1
 	// ArmRAG classifies against raw corpus excerpts retrieved for the current
 	// batch of stories (embeddings over profile/corpus). The caller fills
-	// UserProfile.CorpusChunks before classifying.
+	// UserProfile.RetrievedExcerpts before classifying.
 	ArmRAG Arm = 2
 )
 
@@ -40,11 +40,18 @@ type StoryDetail struct {
 type UserProfile struct {
 	Summary   string
 	Interests []string
-	// CorpusChunks carries ArmRAG context: corpus excerpts retrieved for the
-	// current batch of stories. Only ArmRAG reads it - the arm, not this
-	// field's emptiness, selects the prompt, so each arm builds from exactly
-	// one context source and the arms stay comparable in the eval.
-	CorpusChunks []string
+	// RetrievedExcerpts carries ArmRAG context: the top-k corpus chunks the
+	// caller retrieved for THIS batch of stories - not the corpus, and not a
+	// cached copy of the index. Every element is inlined verbatim into the
+	// system prompt, so its length is the per-call token cost; that is why the
+	// caller retrieves a handful rather than loading profile/corpus_index.json
+	// (sending the whole corpus every 4h is the cost Approach 3 exists to
+	// avoid). Unlike Summary/Interests, which are built once per run, this is
+	// per classify call - the retrieval query is the batch's own titles.
+	// Only ArmRAG reads it: the arm, not this field's emptiness, selects the
+	// prompt, so each arm builds from exactly one context source and the arms
+	// stay comparable in the eval.
+	RetrievedExcerpts []string
 }
 
 // IsEmpty reports whether the profile carries no usable signal. Since flow
@@ -52,7 +59,7 @@ type UserProfile struct {
 // e.g. to reject an ArmInterests run whose loaded profile turned out empty.
 // Centralized so adding signal fields updates the check in one place.
 func (p UserProfile) IsEmpty() bool {
-	return p.Summary == "" && len(p.Interests) == 0 && len(p.CorpusChunks) == 0
+	return p.Summary == "" && len(p.Interests) == 0 && len(p.RetrievedExcerpts) == 0
 }
 
 var constructPromptSystemAttribute = ConstructPromptSystemAttribute
@@ -71,7 +78,7 @@ func ConstructPromptSystemAttribute(arm Arm, profile UserProfile) string {
 	case ArmInterests:
 		return interestsClassificationPrompt(profile)
 	case ArmRAG:
-		return ragClassificationPrompt(profile.CorpusChunks)
+		return ragClassificationPrompt(profile.RetrievedExcerpts)
 	default:
 		return staticClassificationPrompt()
 	}
@@ -109,17 +116,17 @@ Example response: [123, 456, 789]
 // and asks Claude to infer the reader's interests from them. The negative
 // rules and the output contract deliberately mirror the interests prompt so the
 // eval arms differ only in their context source.
-func ragClassificationPrompt(chunks []string) string {
-	excerpts := ""
-	for i, chunk := range chunks {
-		excerpts += "--- Excerpt " + strconv.Itoa(i+1) + " ---\n" + chunk + "\n\n"
+func ragClassificationPrompt(excerpts []string) string {
+	rendered := ""
+	for i, excerpt := range excerpts {
+		rendered += "--- Excerpt " + strconv.Itoa(i+1) + " ---\n" + excerpt + "\n\n"
 	}
 
 	return `You are a Hacker News story classifier that selects stories matching a specific reader's technical interests.
 
 The excerpts below are taken from documents the reader collected: repository READMEs, blog posts, and white papers they are interested in. Treat them as evidence of the reader's technical interests.
 
-` + excerpts + `Classify a story as relevant if its title indicates it covers a topic these excerpts show the reader cares about, or a closely related technical topic. Generalize sensibly - an excerpt implies interest in adjacent subtopics within the same domain - but do NOT include stories that merely sit in the broad software industry without matching these interests.
+` + rendered + `Classify a story as relevant if its title indicates it covers a topic these excerpts show the reader cares about, or a closely related technical topic. Generalize sensibly - an excerpt implies interest in adjacent subtopics within the same domain - but do NOT include stories that merely sit in the broad software industry without matching these interests.
 
 Do NOT classify as relevant:
 - Tech industry news, business, fundraising, or hiring

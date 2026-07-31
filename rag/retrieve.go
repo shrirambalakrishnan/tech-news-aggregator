@@ -72,9 +72,11 @@ func topKBySimilarity(chunks []Chunk, queryVec []float32, k int) []Chunk {
 }
 
 // RetrieveContext returns the texts of the k corpus chunks most similar to
-// query, best match first. Callers must fail soft on error — the index may not
-// exist (the embed step hasn't run), and classification should fall back to
-// the profile/static rules rather than abort, mirroring LoadUserContext.
+// query, best match first. An error usually means the index is missing (the
+// embed step hasn't run). Callers must NOT fail soft on it: under explicit arm
+// selection a run asked for arm 2 has to exit non-zero rather than quietly
+// classify under arm 1's profile or arm 0's static rules, which would publish
+// numbers labelled "RAG" that were really another arm's (issue #11).
 func RetrieveContext(query string, k int) ([]string, error) {
 	// Load the index before embedding: a missing index is the common failure
 	// mode and is free to detect, while the embedding costs a network call.

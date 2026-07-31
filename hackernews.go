@@ -93,8 +93,9 @@ func GetHackerNewsStoriesInPage(page int) []HackerNewsStory {
 //
 //   - ArmGeneric   -> empty profile; the generic flow needs no user data.
 //   - ArmInterests -> profile from the distilled JSON; errors if it's absent.
-//   - ArmRAG       -> empty here on purpose; its CorpusChunks are query-dependent
-//     and get retrieved per batch (see FilterHackerNewsStoriesByTitle).
+//   - ArmRAG       -> empty here on purpose; its RetrievedExcerpts are the result
+//     of a retrieval keyed by the batch's titles, which don't exist yet at this
+//     point, so they get filled in FilterHackerNewsStoriesByTitle.
 func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.UserProfile, error) {
 	switch arm {
 	case hackernews_classifier.ArmGeneric:
@@ -137,9 +138,14 @@ func FilterHackerNewsStoriesByTitle(arm hackernews_classifier.Arm, stories []Hac
 		return nil, err
 	}
 
-	// Arm 2 (RAG): retrieve the corpus chunks most similar to this batch. The
-	// batch's titles double as the retrieval query — the known
-	// confirmation-bias trade-off (see CLAUDE.md, retrieval-key problem).
+	// Arm 2 (RAG): retrieve the RETRIEVAL_TOP_K corpus chunks most similar to
+	// this batch and hand only those to the classifier - they get inlined
+	// verbatim into the prompt, so this is deliberately a handful of excerpts
+	// and never the whole index. The batch's titles double as the retrieval
+	// query — the known confirmation-bias trade-off (see CLAUDE.md,
+	// retrieval-key problem). That query is why retrieval happens here and not
+	// in buildProfileForArm: the titles only exist at this point.
+	//
 	// Unlike the pre-#11 code this does NOT fail soft: a run asked for arm 2
 	// must exit non-zero when the index is missing rather than quietly
 	// classifying under arm 0's static rules.
@@ -148,11 +154,11 @@ func FilterHackerNewsStoriesByTitle(arm hackernews_classifier.Arm, stories []Hac
 		for _, story := range storiesWithTitle {
 			titles = append(titles, story.Title)
 		}
-		chunks, err := loadRagContext(strings.Join(titles, "\n"), rag.RETRIEVAL_TOP_K)
+		excerpts, err := loadRagContext(strings.Join(titles, "\n"), rag.RETRIEVAL_TOP_K)
 		if err != nil {
 			return nil, fmt.Errorf("arm 2 (RAG): corpus retrieval failed (run `go run . embed`): %w", err)
 		}
-		userProfile.CorpusChunks = chunks
+		userProfile.RetrievedExcerpts = excerpts
 	}
 
 	filteredStoryIds := classifyTechNewsStory(arm, storiesWithTitle, userProfile)

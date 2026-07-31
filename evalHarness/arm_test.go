@@ -51,9 +51,22 @@ func TestBuildProfileForArm(t *testing.T) {
 		}
 	})
 
-	t.Run("ArmRAG errors (stub)", func(t *testing.T) {
-		if _, err := buildProfileForArm(hackernews_classifier.ArmRAG); err == nil {
-			t.Fatal("expected arm 2 to error (stubbed), got nil")
+	t.Run("ArmRAG returns an empty profile without loading", func(t *testing.T) {
+		loadUserContext = func(path string) (profile.UserContext, error) {
+			t.Fatal("ArmRAG must not load the distilled user context")
+			return profile.UserContext{}, nil
+		}
+		defer func() { loadUserContext = profile.LoadUserContext }()
+
+		// Arm 2's RetrievedExcerpts are query-dependent, so classifyInBatches fills
+		// them per batch. A retrieval failure errors there (see eval_test.go),
+		// so the arm still fails loudly rather than scoring arm 0.
+		p, err := buildProfileForArm(hackernews_classifier.ArmRAG)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !p.IsEmpty() {
+			t.Fatalf("expected empty profile, got %+v", p)
 		}
 	})
 }

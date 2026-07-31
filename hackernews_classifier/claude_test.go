@@ -26,9 +26,9 @@ func TestUserProfileIsEmpty(t *testing.T) {
 		}
 	})
 
-	t.Run("false when corpus chunks are set", func(t *testing.T) {
-		if (UserProfile{CorpusChunks: []string{"a retrieved chunk"}}).IsEmpty() {
-			t.Fatalf("expected UserProfile with corpus chunks to not be empty")
+	t.Run("false when retrieved excerpts are set", func(t *testing.T) {
+		if (UserProfile{RetrievedExcerpts: []string{"a retrieved chunk"}}).IsEmpty() {
+			t.Fatalf("expected UserProfile with retrieved excerpts to not be empty")
 		}
 	})
 }
@@ -89,16 +89,16 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 		}
 	})
 
-	t.Run("builds the prompt from corpus chunks alone for ArmRAG", func(t *testing.T) {
+	t.Run("builds the prompt from retrieved excerpts alone for ArmRAG", func(t *testing.T) {
 		profile := UserProfile{
-			Summary:      "Repositories focus on distributed systems.",
-			Interests:    []string{"Spanner"},
-			CorpusChunks: []string{"TrueTime bounds clock uncertainty", "Raft elects a single leader"},
+			Summary:           "Repositories focus on distributed systems.",
+			Interests:         []string{"Spanner"},
+			RetrievedExcerpts: []string{"TrueTime bounds clock uncertainty", "Raft elects a single leader"},
 		}
 
 		got := ConstructPromptSystemAttribute(ArmRAG, profile)
 
-		for i, chunk := range profile.CorpusChunks {
+		for i, chunk := range profile.RetrievedExcerpts {
 			if !strings.Contains(got, chunk) {
 				t.Fatalf("expected rag prompt to contain chunk %d, got %s", i+1, got)
 			}
@@ -111,32 +111,32 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 		}
 	})
 
-	// The arm - not the presence of CorpusChunks - selects the flow, so a
+	// The arm - not the presence of RetrievedExcerpts - selects the flow, so a
 	// profile carrying both must still yield exactly its arm's prompt.
-	t.Run("ignores corpus chunks for ArmInterests", func(t *testing.T) {
+	t.Run("ignores retrieved excerpts for ArmInterests", func(t *testing.T) {
 		profile := UserProfile{
-			Summary:      "Repositories focus on distributed systems.",
-			Interests:    []string{"Spanner"},
-			CorpusChunks: []string{"TrueTime bounds clock uncertainty"},
+			Summary:           "Repositories focus on distributed systems.",
+			Interests:         []string{"Spanner"},
+			RetrievedExcerpts: []string{"TrueTime bounds clock uncertainty"},
 		}
 
 		got := ConstructPromptSystemAttribute(ArmInterests, profile)
 
-		if strings.Contains(got, profile.CorpusChunks[0]) {
-			t.Fatalf("expected the interests prompt to omit corpus chunks, got %s", got)
+		if strings.Contains(got, profile.RetrievedExcerpts[0]) {
+			t.Fatalf("expected the interests prompt to omit retrieved excerpts, got %s", got)
 		}
 		if !strings.Contains(got, profile.Summary) {
 			t.Fatalf("expected the interests prompt to contain the summary, got %s", got)
 		}
 	})
 
-	t.Run("ignores corpus chunks for ArmGeneric", func(t *testing.T) {
-		profile := UserProfile{CorpusChunks: []string{"TrueTime bounds clock uncertainty"}}
+	t.Run("ignores retrieved excerpts for ArmGeneric", func(t *testing.T) {
+		profile := UserProfile{RetrievedExcerpts: []string{"TrueTime bounds clock uncertainty"}}
 
 		got := ConstructPromptSystemAttribute(ArmGeneric, profile)
 
-		if strings.Contains(got, profile.CorpusChunks[0]) {
-			t.Fatalf("expected the static prompt to omit corpus chunks, got %s", got)
+		if strings.Contains(got, profile.RetrievedExcerpts[0]) {
+			t.Fatalf("expected the static prompt to omit retrieved excerpts, got %s", got)
 		}
 		if !strings.Contains(got, "Programming languages, compilers, interpreters") {
 			t.Fatalf("expected the static ruleset, got %s", got)

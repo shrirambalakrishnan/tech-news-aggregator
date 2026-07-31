@@ -14,9 +14,9 @@ import (
 	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
-// parseArm converts a CLI argument into an Arm. Only the currently valid arms
-// (0, 1) and the stubbed arm 2 are accepted; anything else errors so a typo
-// can't silently fall through to a default flow.
+// parseArm converts a CLI argument into an Arm. Only the valid arms (0, 1, 2)
+// are accepted; anything else errors so a typo can't silently fall through to a
+// default flow.
 func parseArm(s string) (hackernews_classifier.Arm, error) {
 	n, err := strconv.Atoi(s)
 	if err != nil {
@@ -26,7 +26,7 @@ func parseArm(s string) (hackernews_classifier.Arm, error) {
 	case hackernews_classifier.ArmGeneric, hackernews_classifier.ArmInterests, hackernews_classifier.ArmRAG:
 		return hackernews_classifier.Arm(n), nil
 	default:
-		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG[stub])", n)
+		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG)", n)
 	}
 }
 
@@ -89,7 +89,7 @@ func runEmbed() error {
 // for one arm can't silently score another.
 func runEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests)")
+		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG)")
 	}
 	arm, err := parseArm(args[0])
 	if err != nil {

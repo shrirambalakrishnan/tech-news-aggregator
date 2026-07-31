@@ -5,14 +5,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
 	"github.com/shrirambalakrishnan/tech-news/profile"
+	"github.com/shrirambalakrishnan/tech-news/rag"
 )
-
-// errArmNotImplemented backs the arm 2 stub. Its own variable so tests can
-// assert on it without matching the message text.
-var errArmNotImplemented = fmt.Errorf("arm 2 (RAG): corpus chunks unavailable - not implemented")
 
 // LABELLED_DATA_FILE is the hand-labelled dataset (git-ignored). Path is
 // relative to the repo root, where `go run . eval` executes.
@@ -29,6 +27,7 @@ var EVAL_BATCH_SIZE = 30
 // swap these for fakes so the runner never touches the network or the disk.
 var classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory
 var loadUserContext = profile.LoadUserContext
+var loadRagContext = rag.RetrieveContext
 
 // RunEval is the `go run . eval <arm>` entrypoint: load the labelled data, run
 // the classifier over it in batches exactly as production would under the given
@@ -49,7 +48,10 @@ func RunEval(arm hackernews_classifier.Arm) {
 		log.Fatal("eval: ", err)
 	}
 
-	predictedIDs := classifyInBatches(arm, dataset, userProfile)
+	predictedIDs, err := classifyInBatches(arm, dataset, userProfile)
+	if err != nil {
+		log.Fatal("eval: ", err)
+	}
 
 	metrics := Evaluate(predictedIDs, dataset)
 
@@ -77,7 +79,9 @@ func loadLabelledData(path string) ([]LabelledStory, error) {
 //
 //   - ArmGeneric   -> empty profile; the generic flow needs no user data.
 //   - ArmInterests -> profile from the distilled JSON; errors if it's absent.
-//   - ArmRAG       -> stubbed this iteration; always errors.
+//   - ArmRAG       -> empty here on purpose; its RetrievedExcerpts are the result
+//     of a retrieval keyed by the batch's titles, which don't exist yet at this
+//     point, so they get filled per batch in classifyInBatches.
 func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.UserProfile, error) {
 	switch arm {
 	case hackernews_classifier.ArmGeneric:
@@ -92,7 +96,11 @@ func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.Us
 			Interests: userContext.Interests,
 		}, nil
 	case hackernews_classifier.ArmRAG:
-		return hackernews_classifier.UserProfile{}, errArmNotImplemented
+		// Nothing to load up front: the RAG context is retrieved per batch,
+		// keyed by that batch's titles, so only classifyInBatches can build it.
+		// A missing index surfaces there as an error, so the arm still fails
+		// loudly rather than silently scoring arm 0. Mirrors main's arm 2 case.
+		return hackernews_classifier.UserProfile{}, nil
 	default:
 		return hackernews_classifier.UserProfile{}, fmt.Errorf("unknown arm: %d", arm)
 	}
@@ -102,7 +110,11 @@ func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.Us
 // chunk in one Claude call under the given arm, and concatenates the
 // predicted-relevant IDs. This is the "batch 30" run shape: each call is the
 // same size production sends.
-func classifyInBatches(arm hackernews_classifier.Arm, dataset []LabelledStory, userProfile hackernews_classifier.UserProfile) []int {
+//
+// Under ArmRAG the profile is rebuilt per batch, because retrieval is keyed by
+// the batch's own titles - exactly as production does it in
+// FilterHackerNewsStoriesByTitle, so the measured numbers stay transferable.
+func classifyInBatches(arm hackernews_classifier.Arm, dataset []LabelledStory, userProfile hackernews_classifier.UserProfile) ([]int, error) {
 	var predicted []int
 
 	for start := 0; start < len(dataset); start += EVAL_BATCH_SIZE {
@@ -118,12 +130,38 @@ func classifyInBatches(arm hackernews_classifier.Arm, dataset []LabelledStory, u
 			stories = append(stories, hackernews_classifier.StoryDetail{Id: s.StoryID, Title: s.Title})
 		}
 
-		ids := classifyTechNewsStory(arm, stories, userProfile)
+		// Arm 2: retrieve this batch's excerpts. The copy is deliberate -
+		// RetrievedExcerpts is per-call state (its query is this batch's own
+		// titles), so it must not leak into the next batch's profile the way
+		// Summary/Interests legitimately do. Errors abort the eval rather than
+		// falling back - a run labelled "RAG" must never be scored against the
+		// static ruleset (issue #11).
+		batchProfile := userProfile
+		if arm == hackernews_classifier.ArmRAG {
+			excerpts, err := retrieveForBatch(stories)
+			if err != nil {
+				return nil, fmt.Errorf("arm 2 (RAG): batch %d-%d: %w (run `go run . embed`)", start, end-1, err)
+			}
+			batchProfile.RetrievedExcerpts = excerpts
+		}
+
+		ids := classifyTechNewsStory(arm, stories, batchProfile)
 		predicted = append(predicted, ids...)
 
 		log.Printf("eval: classified batch %d-%d (%d stories) -> %d flagged relevant",
 			start, end-1, len(batch), len(ids))
 	}
 
-	return predicted
+	return predicted, nil
+}
+
+// retrieveForBatch builds the arm 2 retrieval query the same way production
+// does - the batch's titles joined by newline - and returns the top-k excerpts.
+// Kept separate so the query-construction rule lives in one place per package.
+func retrieveForBatch(stories []hackernews_classifier.StoryDetail) ([]string, error) {
+	titles := make([]string, 0, len(stories))
+	for _, story := range stories {
+		titles = append(titles, story.Title)
+	}
+	return loadRagContext(strings.Join(titles, "\n"), rag.RETRIEVAL_TOP_K)
 }

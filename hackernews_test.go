@@ -285,8 +285,8 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		if gotK != rag.RETRIEVAL_TOP_K {
 			t.Fatalf("expected k = RETRIEVAL_TOP_K (%d), got %d", rag.RETRIEVAL_TOP_K, gotK)
 		}
-		if len(classifyTechNewsStoryCallProfile.CorpusChunks) != 2 ||
-			classifyTechNewsStoryCallProfile.CorpusChunks[0] != "chunk about spanner" {
+		if len(classifyTechNewsStoryCallProfile.RetrievedExcerpts) != 2 ||
+			classifyTechNewsStoryCallProfile.RetrievedExcerpts[0] != "chunk about spanner" {
 			t.Fatalf("expected retrieved chunks on the profile, got %+v", classifyTechNewsStoryCallProfile)
 		}
 	})
