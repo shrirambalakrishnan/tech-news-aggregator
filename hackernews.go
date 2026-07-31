@@ -2,13 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 
+	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
-	"github.com/shrirambalakrishnan/tech-news/profile"
 )
 
 const (
@@ -25,7 +24,7 @@ var getHackerNewsStoriesInPage = GetHackerNewsStoriesInPage
 var filterHackerNewsStoriesByTitle = FilterHackerNewsStoriesByTitle
 var classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory
 var getHackerNewsStories = GetHackerNewsStories
-var loadUserContext = profile.LoadUserContext
+var buildProfileForArm = armcontext.BuildProfile
 
 type HackerNewsStory struct {
 	Author    string `json:"author"`
@@ -84,34 +83,6 @@ func GetHackerNewsStoriesInPage(page int) []HackerNewsStory {
 	return storiesResponse.Hits
 }
 
-// buildProfileForArm initializes the UserProfile the chosen arm requires, and
-// errors (rather than failing soft) when the arm's data is missing - so the
-// caller can exit non-zero instead of silently running a different arm.
-//
-//   - ArmGeneric   -> empty profile; the generic flow needs no user data.
-//   - ArmInterests -> profile from the distilled JSON; errors if it's absent.
-//   - ArmRAG       -> stubbed this iteration; always errors (corpus chunks
-//     unavailable).
-func buildProfileForArm(arm hackernews_classifier.Arm) (hackernews_classifier.UserProfile, error) {
-	switch arm {
-	case hackernews_classifier.ArmGeneric:
-		return hackernews_classifier.UserProfile{}, nil
-	case hackernews_classifier.ArmInterests:
-		userContext, err := loadUserContext(profile.USER_CONTEXT_FILE)
-		if err != nil {
-			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 1 (interests): distilled user profile unavailable at %s (run `go run . prebuild`): %w", profile.USER_CONTEXT_FILE, err)
-		}
-		return hackernews_classifier.UserProfile{
-			Summary:   userContext.Summary,
-			Interests: userContext.Interests,
-		}, nil
-	case hackernews_classifier.ArmRAG:
-		return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 2 (RAG): corpus chunks unavailable - not implemented")
-	default:
-		return hackernews_classifier.UserProfile{}, fmt.Errorf("unknown arm: %d", arm)
-	}
-}
-
 func FilterHackerNewsStoriesByTitle(arm hackernews_classifier.Arm, stories []HackerNewsStory) ([]HackerNewsStory, error) {
 	storiesWithTitle := []hackernews_classifier.StoryDetail{}
 	for _, story := range stories {
@@ -122,10 +93,11 @@ func FilterHackerNewsStoriesByTitle(arm hackernews_classifier.Arm, stories []Hac
 	}
 	filteredStories := []HackerNewsStory{}
 
-	// Build the profile the arm requires. An error here (e.g. arm 1 with no
-	// distilled JSON) propagates up so the run exits non-zero rather than
-	// silently classifying under a different flow.
-	userProfile, err := buildProfileForArm(arm)
+	// Build the context this arm classifies against - including, under arm 2,
+	// the excerpts retrieved for these very stories. Any failure (arm 1 without
+	// its distilled JSON, arm 2 without its index) propagates up so the run
+	// exits non-zero instead of silently classifying under a different flow.
+	userProfile, err := buildProfileForArm(arm, storiesWithTitle)
 	if err != nil {
 		return nil, err
 	}

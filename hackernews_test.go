@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
-	"github.com/shrirambalakrishnan/tech-news/profile"
 )
 
 func TestGetHackerNewsStories(t *testing.T) {
@@ -101,10 +101,10 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 
 	t.Run("calls ClassifyTechNewsStory with correct parameters", func(t *testing.T) {
 
-		loadUserContext = func(path string) (profile.UserContext, error) {
-			return profile.UserContext{Summary: "backend work", Interests: []string{"Go", "Spanner"}}, nil
+		buildProfileForArm = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail) (hackernews_classifier.UserProfile, error) {
+			return hackernews_classifier.UserProfile{Summary: "backend work", Interests: []string{"Go", "Spanner"}}, nil
 		}
-		defer func() { loadUserContext = profile.LoadUserContext }()
+		defer func() { buildProfileForArm = armcontext.BuildProfile }()
 
 		classifyTechNewsStoryCallCount := 0
 		classifyTechNewsStoryCallParameters := [][]hackernews_classifier.StoryDetail{}
@@ -130,7 +130,7 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		}
 
 		if classifyTechNewsStoryCallProfile.Summary != "backend work" || len(classifyTechNewsStoryCallProfile.Interests) != 2 {
-			t.Fatalf("expected loaded user context mapped into the profile, got %+v", classifyTechNewsStoryCallProfile)
+			t.Fatalf("expected the built profile passed to the classifier, got %+v", classifyTechNewsStoryCallProfile)
 		}
 
 		expectedStoryDetails := []hackernews_classifier.StoryDetail{
@@ -153,17 +153,12 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 
 	t.Run("returns filtered stories based on ClassifyTechNewsStory response", func(t *testing.T) {
 
-		loadUserContext = func(path string) (profile.UserContext, error) {
-			return profile.UserContext{Summary: "backend work"}, nil
-		}
-		defer func() { loadUserContext = profile.LoadUserContext }()
-
 		classifyTechNewsStory = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
 			return []int{1, 3}
 		}
 		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-		filteredStories, err := FilterHackerNewsStoriesByTitle(hackernews_classifier.ArmInterests, []HackerNewsStory{
+		filteredStories, err := FilterHackerNewsStoriesByTitle(hackernews_classifier.ArmGeneric, []HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
 			{StoryId: 2, Title: "story2", Author: "Author1"},
 			{StoryId: 3, Title: "story3", Author: "Author3"},
@@ -189,14 +184,20 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 
 	})
 
-	t.Run("ArmGeneric passes an empty profile and never loads user context", func(t *testing.T) {
+	// The arm and the stories are the builder's whole input: the arm selects the
+	// flow, and the stories are arm 2's retrieval query. Passing the mapped
+	// StoryDetails (not the raw HN stories) is what lets one shared builder serve
+	// both this path and the eval. Per-arm construction itself is covered in
+	// armcontext/build_test.go.
+	t.Run("delegates context building to buildProfileForArm with the arm and mapped stories", func(t *testing.T) {
 
-		loadUserContextCalled := false
-		loadUserContext = func(path string) (profile.UserContext, error) {
-			loadUserContextCalled = true
-			return profile.UserContext{Summary: "backend work"}, nil
+		var gotArm hackernews_classifier.Arm
+		var gotStories []hackernews_classifier.StoryDetail
+		buildProfileForArm = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail) (hackernews_classifier.UserProfile, error) {
+			gotArm, gotStories = arm, stories
+			return hackernews_classifier.UserProfile{RetrievedExcerpts: []string{"chunk about raft"}}, nil
 		}
-		defer func() { loadUserContext = profile.LoadUserContext }()
+		defer func() { buildProfileForArm = armcontext.BuildProfile }()
 
 		var classifyTechNewsStoryCallProfile hackernews_classifier.UserProfile
 		classifyTechNewsStory = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
@@ -205,27 +206,39 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		}
 		defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-		if _, err := FilterHackerNewsStoriesByTitle(hackernews_classifier.ArmGeneric, []HackerNewsStory{
+		if _, err := FilterHackerNewsStoriesByTitle(hackernews_classifier.ArmRAG, []HackerNewsStory{
 			{StoryId: 1, Title: "story1", Author: "Author1"},
+			{StoryId: 2, Title: "story2", Author: "Author2"},
 		}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if loadUserContextCalled {
-			t.Fatal("ArmGeneric should not load user context")
+		if gotArm != hackernews_classifier.ArmRAG {
+			t.Fatalf("builder called with arm %d, want ArmRAG", gotArm)
 		}
-		if !classifyTechNewsStoryCallProfile.IsEmpty() {
-			t.Fatalf("expected an empty profile under ArmGeneric, got %+v", classifyTechNewsStoryCallProfile)
+		wantStories := []hackernews_classifier.StoryDetail{{Id: 1, Title: "story1"}, {Id: 2, Title: "story2"}}
+		if len(gotStories) != len(wantStories) {
+			t.Fatalf("builder called with %v, want %v", gotStories, wantStories)
 		}
-
+		for i, want := range wantStories {
+			if gotStories[i] != want {
+				t.Fatalf("builder called with %v, want %v", gotStories, wantStories)
+			}
+		}
+		if len(classifyTechNewsStoryCallProfile.RetrievedExcerpts) != 1 ||
+			classifyTechNewsStoryCallProfile.RetrievedExcerpts[0] != "chunk about raft" {
+			t.Fatalf("expected the built profile passed to the classifier, got %+v", classifyTechNewsStoryCallProfile)
+		}
 	})
 
-	t.Run("ArmInterests errors (and does not classify) when user context is unavailable", func(t *testing.T) {
+	// A run asked for one arm must exit non-zero rather than classify under
+	// another (issue #11), so a build failure has to stop before the Claude call.
+	t.Run("propagates the builder error and does not classify", func(t *testing.T) {
 
-		loadUserContext = func(path string) (profile.UserContext, error) {
-			return profile.UserContext{}, errors.New("file not found")
+		buildProfileForArm = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail) (hackernews_classifier.UserProfile, error) {
+			return hackernews_classifier.UserProfile{}, errors.New("distilled user profile unavailable")
 		}
-		defer func() { loadUserContext = profile.LoadUserContext }()
+		defer func() { buildProfileForArm = armcontext.BuildProfile }()
 
 		classifyCalled := false
 		classifyTechNewsStory = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail, userProfile hackernews_classifier.UserProfile) []int {
@@ -239,10 +252,10 @@ func TestFilterHackerNewsStoriesByTitle(t *testing.T) {
 		})
 
 		if err == nil {
-			t.Fatal("expected an error when arm 1 profile is unavailable, got nil")
+			t.Fatal("expected an error when the arm's context cannot be built, got nil")
 		}
 		if classifyCalled {
-			t.Fatal("classifier must not run when the arm's profile is unavailable")
+			t.Fatal("classifier must not run when the arm's context is unavailable")
 		}
 
 	})

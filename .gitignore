@@ -8,3 +8,14 @@ profile/user_context.json
 
 # backup in notes
 evalHarness/hn-responses-labelled.json
+
+# raw resources to be processed for giving as input to RAG
+# contents backed up in Obsidian
+profile/readmes
+profile/blogs
+profile/whitepapers
+
+# processed resources input to RAG
+profile/corpus
+
+profile/corpus_index*.json

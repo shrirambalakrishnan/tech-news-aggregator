@@ -11,11 +11,12 @@ import (
 	"github.com/shrirambalakrishnan/tech-news/evalHarness"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
 	"github.com/shrirambalakrishnan/tech-news/profile"
+	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
-// parseArm converts a CLI argument into an Arm. Only the currently valid arms
-// (0, 1) and the stubbed arm 2 are accepted; anything else errors so a typo
-// can't silently fall through to a default flow.
+// parseArm converts a CLI argument into an Arm. Only the valid arms (0, 1, 2)
+// are accepted; anything else errors so a typo can't silently fall through to a
+// default flow.
 func parseArm(s string) (hackernews_classifier.Arm, error) {
 	n, err := strconv.Atoi(s)
 	if err != nil {
@@ -25,7 +26,7 @@ func parseArm(s string) (hackernews_classifier.Arm, error) {
 	case hackernews_classifier.ArmGeneric, hackernews_classifier.ArmInterests, hackernews_classifier.ArmRAG:
 		return hackernews_classifier.Arm(n), nil
 	default:
-		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG[stub])", n)
+		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG)", n)
 	}
 }
 
@@ -44,6 +45,7 @@ func main() {
 //	go run . [arm]      -> classify (arm optional, defaults to 0)
 //	go run . eval <arm> -> eval     (arm REQUIRED)
 //	go run . prebuild   -> prebuild
+//	go run . embed      -> build the arm 2 (RAG) corpus index
 func run(args []string) error {
 	godotenv.Load()
 
@@ -55,6 +57,8 @@ func run(args []string) error {
 	switch command {
 	case "prebuild":
 		return runPrebuild()
+	case "embed":
+		return runEmbed()
 	case "eval":
 		return runEval(args[1:])
 	default:
@@ -71,13 +75,21 @@ func runPrebuild() error {
 	return nil
 }
 
+// runEmbed chunks profile/corpus, embeds each chunk via Voyage, and writes
+// profile/corpus_index.json - the index arm 2 (RAG) retrieves from. Run
+// occasionally, not every 4h; requires VOYAGE_API_KEY in env.
+func runEmbed() error {
+	rag.BuildCorpusIndex()
+	return nil
+}
+
 // runEval runs the classifier over the hand-labelled dataset and prints
 // precision/recall plus the misclassified titles. Offline quality check, not
 // part of the scheduled run. The arm is REQUIRED (no default) so an eval meant
 // for one arm can't silently score another.
 func runEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests)")
+		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG)")
 	}
 	arm, err := parseArm(args[0])
 	if err != nil {

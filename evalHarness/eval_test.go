@@ -1,9 +1,11 @@
 package evalHarness
 
 import (
+	"errors"
 	"math"
 	"testing"
 
+	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
 )
 
@@ -116,7 +118,10 @@ func TestClassifyInBatches(t *testing.T) {
 	}
 	defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
 
-	predicted := classifyInBatches(hackernews_classifier.ArmGeneric, dataset, hackernews_classifier.UserProfile{})
+	predicted, err := classifyInBatches(hackernews_classifier.ArmGeneric, dataset)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// 5 stories at batch size 2 -> chunks of 2, 2, 1.
 	wantSizes := []int{2, 2, 1}
@@ -138,5 +143,97 @@ func TestClassifyInBatches(t *testing.T) {
 		if predicted[i] != want[i] {
 			t.Errorf("predicted[%d] = %d, want %d", i, predicted[i], want[i])
 		}
+	}
+}
+
+// TestClassifyInBatchesPerBatchProfile covers the property that makes the eval
+// transferable: the profile is rebuilt per batch from that batch's own stories -
+// the same thing FilterHackerNewsStoriesByTitle does per run - so arm 2's
+// retrieval is keyed by the batch's titles instead of one global context reused
+// across the dataset. Per-arm construction itself lives in armcontext.
+func TestClassifyInBatchesPerBatchProfile(t *testing.T) {
+	dataset := []LabelledStory{
+		{StoryID: 1, Title: "a"}, {StoryID: 2, Title: "b"},
+		{StoryID: 3, Title: "c"}, {StoryID: 4, Title: "d"},
+	}
+
+	originalBatch := EVAL_BATCH_SIZE
+	EVAL_BATCH_SIZE = 2
+	defer func() { EVAL_BATCH_SIZE = originalBatch }()
+
+	var gotBatches [][]hackernews_classifier.StoryDetail
+	buildProfileForArm = func(arm hackernews_classifier.Arm, stories []hackernews_classifier.StoryDetail) (hackernews_classifier.UserProfile, error) {
+		if arm != hackernews_classifier.ArmRAG {
+			t.Errorf("builder called with arm %d, want ArmRAG", arm)
+		}
+		gotBatches = append(gotBatches, stories)
+		return hackernews_classifier.UserProfile{RetrievedExcerpts: []string{"chunk for " + stories[0].Title}}, nil
+	}
+	defer func() { buildProfileForArm = armcontext.BuildProfile }()
+
+	var gotChunks [][]string
+	classifyTechNewsStory = func(_ hackernews_classifier.Arm, _ []hackernews_classifier.StoryDetail, p hackernews_classifier.UserProfile) []int {
+		gotChunks = append(gotChunks, p.RetrievedExcerpts)
+		return []int{}
+	}
+	defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
+
+	if _, err := classifyInBatches(hackernews_classifier.ArmRAG, dataset); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The builder sees each batch alone, never the whole dataset.
+	wantBatches := [][]string{{"a", "b"}, {"c", "d"}}
+	if len(gotBatches) != len(wantBatches) {
+		t.Fatalf("built %d profiles, want %d", len(gotBatches), len(wantBatches))
+	}
+	for i, want := range wantBatches {
+		if len(gotBatches[i]) != len(want) {
+			t.Fatalf("batch %d = %v, want titles %v", i, gotBatches[i], want)
+		}
+		for j, title := range want {
+			if gotBatches[i][j].Title != title {
+				t.Errorf("batch %d story %d = %q, want %q", i, j, gotBatches[i][j].Title, title)
+			}
+		}
+	}
+
+	// Each batch is classified with its own context, not one carried over from
+	// the previous batch.
+	for i, batch := range wantBatches {
+		want := "chunk for " + batch[0]
+		if len(gotChunks[i]) != 1 || gotChunks[i][0] != want {
+			t.Errorf("batch %d classified with %v, want %q", i, gotChunks[i], want)
+		}
+	}
+}
+
+// A missing artifact (no corpus index, no distilled profile) must abort the eval.
+// Scoring on regardless would publish one arm's numbers under another's name -
+// the failure issue #11 exists to prevent.
+func TestClassifyInBatchesBuildFailureAborts(t *testing.T) {
+	dataset := []LabelledStory{{StoryID: 1, Title: "a"}, {StoryID: 2, Title: "b"}}
+
+	buildProfileForArm = func(_ hackernews_classifier.Arm, _ []hackernews_classifier.StoryDetail) (hackernews_classifier.UserProfile, error) {
+		return hackernews_classifier.UserProfile{}, errors.New("corpus index unavailable")
+	}
+	defer func() { buildProfileForArm = armcontext.BuildProfile }()
+
+	classifyCalled := false
+	classifyTechNewsStory = func(_ hackernews_classifier.Arm, _ []hackernews_classifier.StoryDetail, _ hackernews_classifier.UserProfile) []int {
+		classifyCalled = true
+		return []int{}
+	}
+	defer func() { classifyTechNewsStory = hackernews_classifier.ClassifyTechNewsStory }()
+
+	predicted, err := classifyInBatches(hackernews_classifier.ArmRAG, dataset)
+	if err == nil {
+		t.Fatal("expected an error when the arm's context cannot be built, got nil")
+	}
+	if predicted != nil {
+		t.Errorf("expected no predictions on failure, got %v", predicted)
+	}
+	if classifyCalled {
+		t.Error("classifier must not run when the arm's context is unavailable")
 	}
 }
