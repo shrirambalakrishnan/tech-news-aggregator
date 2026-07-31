@@ -1,0 +1,33 @@
+title Tech News Retrieval - Approach 1 (Based on Github Profle)
+
+group Generate User Profile Interests
+
+  tech-new-aggregator->github:Readme of\ntop K\nPublic Repositories\n\n{ github username }
+
+  tech-new-aggregator<-github:return
+
+  tech-new-aggregator->Anthropic-API:API to generate user interests summary
+
+  tech-new-aggregator<-Anthropic-API:returns { summary, interest-topics }
+
+  tech-new-aggregator->tech-new-aggregator:save to\nuser profile JSON file
+
+end
+
+group Tech News Retrieval
+  tech-new-aggregator->hackernews(algolia API):Top 30 news
+
+  tech-new-aggregator<-hackernews(algolia API):return
+
+  tech-new-aggregator->tech-new-aggregator:generate system prompt\nbased on\nuser profile interests JSON\n(generated in above step)
+
+  tech-new-aggregator->tech-new-aggregator:generate user prompt\nusing hackernews\nresponse\n{ id,title }
+
+  tech-new-aggregator->Anthropic-API:{ systemPrompt, userPrompt, API_KEY }
+
+  tech-new-aggregator<-Anthropic-API:returns IDs of stories\nbased on\nUSER PROFILE INTERESTS\nsystem prompt
+
+  tech-new-aggregator->tech-new-aggregator:append filtered stories\nto file
+
+
+end
