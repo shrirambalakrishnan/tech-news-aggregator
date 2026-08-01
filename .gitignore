@@ -3,6 +3,9 @@ stories.md
 .DS_Store
 tech-news
 
+# local Claude Code permissions (machine-specific, contains local paths)
+.claude/settings.local.json
+
 # regeneratable
 profile/user_context.json
 

@@ -80,9 +80,6 @@ When the script tries to filter the interested news items
 	- Voyage AI
 		- In Step 1 - For creating RAG embeddings
 		- In Step 2 - For creating query vector based on news items
-- **Why it might still lose (recorded up front):** the classifier has no natural
-per-query key — it builds a *fixed* interest model every run. Using the batch's story titles as the retrieval query biases toward *confirming* context, which can inflate false positives. The eval must watch **FP**, not just recall.
-	- ==Check and remove==
 
 ## Run modes (arms)
 
