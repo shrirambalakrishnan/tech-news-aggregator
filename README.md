@@ -3,18 +3,20 @@
 - Find the trending HackerNews articles users will be interested to read
 - Update the filtered list of items every N hours
 
-## Approaches
+## Architecture
 
 ### Approach 1
+---
 
 #### Solution
-- classify whether an article is a cs tech blog or not using `Generic "CS Technical" filter`
+Classify whether an article is a CS Tech Blog or not using `Generic "CS Technical" filter`
 
 #### Sequence Diagram
 
 ![Approach 1 - Sequence Diagram](documentations/sequenceDiagrams/tech-new-approach-0.png)
 
 ### Approach 2
+---
 
 #### Solution
 
@@ -33,11 +35,18 @@
 - The prebuild step distills READMEs into `profile/user_context.json` and the classify run reads that artifact. This is a *lossy proxy*, not a faithful replay of "what Claude would extract if we passed the raw READMEs into the classify call directly"
 — Distillation drops nuance
 - We accept this trade for
-	- cost
-	- stability (?)
-	- inspectability (?)
+	- Cost Reduction
+		- distilled profile JSON ensures reduced content being added to the prompt and not the entire bunch of readmes
+		- this reduces the input tokens and hence cost
+	- Stability
+		- The interests profile is generated once currently
+		- If this is generated during every run, then this would mean we would have a slightly different version of "user profile interests" as LLM output is non-deterministic and can vary slightly everytime
+	- Inspectability
+		- The flow is inspectable due to the artifact - `user profile interests json` file that is generated
+		- Without the artifact, the only observable is the final ID list
 
-### Approach 3 - Use RAG 
+### Approach 3 - Use RAG
+---
 
 #### Solution
 
@@ -48,9 +57,7 @@
 - Then extract his interests to retrieve the news items the user will be interested int
 
 ##### Step 1
-As you can see, the number of resources belonging to user can increase to a huge number. 
-- Why not distillation like Approach 2 here as well?
-- Why use RAG here?
+As you can see, the number of resources belonging to user can increase to a huge number.
 
 As distilling all the available data to create a `user interests` can be very lossy here.
 
@@ -105,33 +112,6 @@ go run . 2              # normal run, arm 2 (RAG) — needs embed's corpus index
 go run . eval 2         # eval under arm 2 — slow on Voyage's free tier, see below
 ```
 
-## Prebuild Steps - Explained
-
-### Approach 2 - Prebuild step (user context)
-
-- Command - `go run . prebuild` 
-- Fetches the configured user's GitHub READMEs (`GITHUB_USERNAME`, see `.env.example`)
-- Asks the LLM to extract an interest profile
-- Writes it to `profile/user_context.json` (a regenerable, git-ignored cache with a
-`generated_at` timestamp)
-	- **Arm 1** reads that file (and errors if it's absent);	
-	- `arm 0` and `arm 2` ignores it. 
-- Run prebuild occasionally since it is the expensive path.
-
-### Approach 3 - Embeddings step (RAG)
-
-- Command - `go run . embed` 
-- Builds the RAG index used by Approach 3
-- It reads every file in `profile/corpus/`
-	- splits each into fixed-size **word windows** (800 words, 120-word overlap)
-		- **What is this Overlap:** consecutive chunks share their last 120 words so an idea that straddles a window boundary still appears whole in at least one chunk (same trick as re-reading a tail of the previous block when a record spans a fixed-size block).
-	- embeds the chunks with **Voyage AI** (`voyage-4-lite`)
-		- It needs `VOYAGE_API_KEY` in the environment (one-off — not exported by `tech-news-run.sh`)
-			- `export VOYAGE_API_KEY=$(security find-generic-password -a "$USER" -s VOYAGE_API_KEY -w)`
-		- **Limitations of using this model:** **Free-tier rate limit:** without a payment method,Voyage throttles to **3 requests/min and 10K tokens/min** (the 200M free-token allowance still applies, so the ~150K-token corpus is effectively free). The embedder paces around this — token-bounded batches, an inter-request delay, and 429 retry-with-backoff — so a full run takes **~20 min**. Adding a payment method on the Voyage dashboard lifts the throttle (still free under 200M tokens); the pacing then just becomes harmless overhead.
-	- writes `profile/corpus_index.json` — a git-ignored, regenerable cache holding provenance metadata plus one record per chunk (`source`, `type`, `chunk_index`, `text`, `embedding`). 
-- Run it occasionally (a one-off, like prebuild), and re-run it whenever the corpus changes.
-
 ## Eval - Execution results
 
 #### Confusion matrix
@@ -157,13 +137,11 @@ The project needs two secret API keys and one non-secret config value:
 
 | Name | Type | Used by | Where it lives |
 |------|------|---------|----------------|
-| `ANTHROPIC_API_KEY` | secret | `claudeapi` — every Claude call (classify + profile extraction) | macOS Keychain |
-| `VOYAGE_API_KEY` | secret | `voyageapi` — embedding the `profile/corpus` chunks (`go run . embed`) and each arm 2 retrieval query | macOS Keychain |
-| `GITHUB_USERNAME` | non-secret | `profile` prebuild — whose repo READMEs to fetch | `.env` (see `.env.example`) |
+| `ANTHROPIC_API_KEY` | secret | All Approaches | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | Approach 3 | macOS Keychain |
+| `GITHUB_USERNAME` | non-secret | Approach 2 | `.env` (see `.env.example`) |
 
-#### API keys (macOS Keychain)
-
-Cron/launchd jobs don't inherit shell environment variables, so secret keys are stored in the macOS Keychain and exported by `tech-news-run.sh` at run time.
+### How to initialize the API keys (macOS Keychain)?
 
 **Store the keys (one-time):**
 ```bash
@@ -177,38 +155,6 @@ security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w
 security find-generic-password -a "$USER" -s "VOYAGE_API_KEY"    -w
 ```
 
-> **Note:** `tech-news-run.sh` exports only `ANTHROPIC_API_KEY`, which is all the scheduled arm 0 run needs. `VOYAGE_API_KEY` is required by `go run . embed` **and** by any arm 2 run (each retrieval embeds its query), so export it manually for those — see *Embeddings step*. If you ever switch the scheduled run to arm 2, the runner has to export it too.
+## Run script
 
-## Runner script
-
-`tech-news-run.sh` fetches the key from keychain and runs the Go program. Make it executable:
-
-```bash
-chmod +x tech-news-run.sh
-```
-
-## Scheduling with launchd (every 4 hours)
-
-Cron on macOS can't access the login keychain, so we use `launchd` instead.
-
-**Install:**
-```bash
-sed "s|REPO_PATH|$(pwd)|g" com.technews.plist > ~/Library/LaunchAgents/com.technews.plist
-launchctl load ~/Library/LaunchAgents/com.technews.plist
-```
-
-**Verify it's loaded:**
-```bash
-launchctl list | grep technews
-```
-
-**Check logs:**
-```bash
-tail -f /tmp/tech-news.log
-```
-
-**Uninstall:**
-```bash
-launchctl unload ~/Library/LaunchAgents/com.technews.plist
-rm ~/Library/LaunchAgents/com.technews.plist
-```
+Use any one of the modes mentioned under the [Run modes](#run-modes-arms) section.
