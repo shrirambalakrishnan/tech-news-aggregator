@@ -1,0 +1,43 @@
+title Tech News Retrieval - Approach 2\n(Based on Data interesting to User \n- Repo Readmes, Blogs, White Papers)
+
+group RAG Embeddings based on User Data
+
+  User->tech-new-aggregator:Provides\n1.Github readme\n2.Blogs\n3.White Papers
+
+  tech-new-aggregator->github:Readme of\nPublic Repositories\n{ github username }
+
+  tech-new-aggregator<-github:return readmes
+  
+  tech-new-aggregator->tech-new-aggregator:adds every\nreadme file\nto corpus
+  tech-new-aggregator->tech-new-aggregator:adds every\nblog\nto corpus
+  tech-new-aggregator->tech-new-aggregator:adds every\nreasearch paper\nto corpus
+
+  loop for every item in corpus
+    tech-new-aggregator->tech-new-aggregator:creates a chunk of 800 words
+    tech-new-aggregator->Voyage AI:generate embedding
+    tech-new-aggregator<-Voyage AI:return vector
+    tech-new-aggregator->tech-new-aggregator:maps embedding vector to the chunk
+  end
+
+  tech-new-aggregator->tech-new-aggregator:stores\nchunk-to-embedding-mapping\nto file
+end
+
+group Tech News Retrieval
+  tech-new-aggregator->hackernews(algolia API):Top 30 news
+
+  tech-new-aggregator<-hackernews(algolia API):return
+  
+  tech-new-aggregator->Voyage AI:Generate Query Vector for the 30 news items
+  tech-new-aggregator<-Voyage AI:return
+  
+  tech-new-aggregator->tech-new-aggregator:find top K chunks\nclose to query vector
+
+  tech-new-aggregator->tech-new-aggregator:generate system prompt using the \ntop K chunks (generated in above step)
+
+  tech-new-aggregator->tech-new-aggregator:generate user prompt\nusing hackernews\nresponse\n{ id,title }
+
+  tech-new-aggregator->Anthropic-API:{ systemPrompt, userPrompt, API_KEY }
+
+  tech-new-aggregator<-Anthropic-API:returns IDs of stories\nuser will be interested
+
+end
