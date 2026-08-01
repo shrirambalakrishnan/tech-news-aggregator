@@ -155,3 +155,7 @@ security find-generic-password -a "$USER" -s "VOYAGE_API_KEY"    -w
 ## Run script
 
 Use any one of the modes mentioned under the [Run modes](#run-modes-arms) section.
+
+## License
+
+Released under the [MIT License](LICENSE).
