@@ -3,7 +3,7 @@
 //
 // The package is organized one file per layer:
 //
-//	voyage.go    — PUBLIC API: EmbedDocuments, the embedBatch DI seam
+//	voyage.go    — PUBLIC API: EmbedDocuments/EmbedQueries, the embedBatch DI seam
 //	ratelimit.go — POLICY: free-tier batching, pacing, and retry rules
 //	client.go    — TRANSPORT: wire types + the single-request HTTP call
 package voyageapi
@@ -37,6 +37,24 @@ func EmbedQuery(text string) ([]float32, error) {
 // input text in the same order. It splits texts into token-bounded batches and
 // paces requests to respect Voyage's free-tier rate limits (see ratelimit.go).
 func EmbedDocuments(texts []string) ([][]float32, error) {
+	return embedAll(texts, VOYAGE_INPUT_TYPE_DOCUMENT)
+}
+
+// EmbedQueries embeds texts as retrieval queries (the plural of EmbedQuery),
+// returning one vector per input text in the same order. Arm 3 retrieves per
+// story, so it needs a vector per story title; since Voyage's request body
+// takes a list, N titles cost one HTTP request, not N.
+//
+// Batching and pacing are shared with EmbedDocuments — only input_type differs,
+// and that difference matters: Voyage embeds the two sides of retrieval
+// differently, so query texts must not go through EmbedDocuments.
+func EmbedQueries(texts []string) ([][]float32, error) {
+	return embedAll(texts, VOYAGE_INPUT_TYPE_QUERY)
+}
+
+// embedAll is the shared body of EmbedDocuments and EmbedQueries: token-bounded
+// batching, free-tier pacing between requests, and per-batch 429 retry.
+func embedAll(texts []string, inputType string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
@@ -50,8 +68,8 @@ func EmbedDocuments(texts []string) ([][]float32, error) {
 			batchTokens += estimateTokens(t)
 		}
 
-		log.Printf("voyage: embedding batch %d/%d (%d chunks, ~%d tokens)", i+1, len(batches), len(batch), batchTokens)
-		vecs, err := embedBatchWithRetry(batch, VOYAGE_INPUT_TYPE_DOCUMENT)
+		log.Printf("voyage: embedding %s batch %d/%d (%d texts, ~%d tokens)", inputType, i+1, len(batches), len(batch), batchTokens)
+		vecs, err := embedBatchWithRetry(batch, inputType)
 		if err != nil {
 			return nil, fmt.Errorf("embed batch %d/%d: %w", i+1, len(batches), err)
 		}

@@ -91,6 +91,81 @@ func TestEmbedDocumentsEmpty(t *testing.T) {
 	}
 }
 
+// TestEmbedQueriesUsesQueryInputType is the one thing that separates
+// EmbedQueries from EmbedDocuments: the input type sent to the wire. Voyage
+// embeds queries and documents differently, so a slip here would silently
+// degrade retrieval rather than fail.
+func TestEmbedQueriesUsesQueryInputType(t *testing.T) {
+	noPacing(t)
+	original := embedBatch
+	defer func() { embedBatch = original }()
+
+	var calls int
+	var gotTexts []string
+	var gotInputType string
+	embedBatch = func(texts []string, inputType string) ([][]float32, error) {
+		calls++
+		gotTexts = texts
+		gotInputType = inputType
+		out := make([][]float32, len(texts))
+		for i := range texts {
+			out[i] = []float32{float32(i)} // encode position to verify ordering
+		}
+		return out, nil
+	}
+
+	titles := make([]string, 30) // a production-sized batch of story titles
+	for i := range titles {
+		titles[i] = fmt.Sprintf("story-%d", i)
+	}
+
+	got, err := EmbedQueries(titles)
+	if err != nil {
+		t.Fatalf("EmbedQueries returned error: %v", err)
+	}
+	if gotInputType != VOYAGE_INPUT_TYPE_QUERY {
+		t.Errorf("expected input type %q, got %q", VOYAGE_INPUT_TYPE_QUERY, gotInputType)
+	}
+	// 30 short titles are far under both the token and count caps, so they
+	// travel as one request — the point of embedding queries in bulk.
+	if calls != 1 {
+		t.Errorf("expected 30 titles to be one request, got %d", calls)
+	}
+	if !reflect.DeepEqual(gotTexts, titles) {
+		t.Errorf("texts sent = %v, want %v", gotTexts, titles)
+	}
+	if len(got) != len(titles) {
+		t.Fatalf("expected %d embeddings, got %d", len(titles), len(got))
+	}
+	for i := range got {
+		if got[i][0] != float32(i) {
+			t.Fatalf("ordering broken: embedding %d = %v", i, got[i])
+		}
+	}
+}
+
+func TestEmbedQueriesEmpty(t *testing.T) {
+	original := embedBatch
+	defer func() { embedBatch = original }()
+
+	called := false
+	embedBatch = func(texts []string, inputType string) ([][]float32, error) {
+		called = true
+		return nil, nil
+	}
+
+	got, err := EmbedQueries(nil)
+	if err != nil {
+		t.Fatalf("EmbedQueries(nil) returned error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 embeddings, got %d", len(got))
+	}
+	if called {
+		t.Error("embedBatch should not be called for empty input")
+	}
+}
+
 func TestPlanBatchesByTokens(t *testing.T) {
 	// estimateTokens = len/4 + 1. A 16-char text => 5 tokens.
 	a := "0123456789abcdef" // 16 chars -> 5 tokens
