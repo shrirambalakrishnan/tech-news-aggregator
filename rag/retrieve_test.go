@@ -153,7 +153,13 @@ func TestPoolChunks(t *testing.T) {
 // It guards ONE of the two ways the gap can close: changing the constants. The
 // other - changing the k arm 2 asks for, at the call site in armcontext - is
 // invisible here, because that k is armcontext's choice and rag cannot import
-// armcontext. TestRetrievalArmsRequestDifferentExcerptBudgets covers that side.
+// armcontext; armcontext's own TestBuildProfileArmRAG already asserts on that k
+// and carries the same warning.
+//
+// What only this test can see is behavioural drift in the pooling itself:
+// topKAboveFloor and poolChunks run for real over a production-sized batch, so a
+// dedupe or truncation change that quietly shrank the pool below the cap would
+// fail here and nowhere else.
 func TestRetrievalArmsInjectDifferentExcerptVolumes(t *testing.T) {
 	// A production-sized batch: HACKERNEWS_HITS_PER_PAGE / EVAL_BATCH_SIZE is 30.
 	const batchSize = 30

@@ -165,8 +165,11 @@ stuffed contexts are a well-documented cause of exactly the kind of recall drop
 observed. *How much* larger is not actually recorded: the per-call token figure
 below is arithmetic **assuming** 20 chunks, not a measurement, so it cannot be
 cited as evidence the cap bound, and `calibrate-floor`'s pool-cap section is
-dedupe-blind. Only a `count_tokens` call or a dedupe-aware re-run settles it. The
-confound holds either way — 5 against "up to 20" differs regardless. **So the recorded delta cannot distinguish
+dedupe-blind. Only a `count_tokens` call or a dedupe-aware re-run settles it.
+**And it genuinely matters which:** "up to 20" includes 5, so if the deduped pool
+ran near 5 per batch there was no volume gap and the delta *is* attributable to
+selection after all. The confound is unresolved, not established — that is the
+whole reason the recorded delta can't be read either way. **So the recorded delta cannot distinguish
 "per-story retrieval didn't help" from "the bigger prompt hurt".** The conclusion
 that survives regardless is the one from the retrieval statistics below (AUC
 0.659): the ranking both arms select from barely separates the classes.
@@ -194,9 +197,10 @@ effect.
 for itself over the static ruleset. Arm 1 remains the precision leader (0.3333
 against a 10% base rate) at the worst recall by far, so the choice between arms 1
 and 2 is still a precision/recall preference, not a quality ranking. Arm 3 adds
-nothing over arm 2 **as configured** and costs ~3.5× as much per eval run (~$0.29
-vs ~$0.08, since 20 pooled chunks go into every prompt instead of 5) — which is
-also the confound described above.
+nothing over arm 2 **as configured**, and its estimated eval cost is ~3.5× arm 2's
+(~$0.29 vs ~$0.08). That estimate assumes a full 20-chunk pool per call; it is the
+same assumption the confound above turns on, so it is a projection of arm 3's
+ceiling, not a measured bill.
 
 Next levers, in cost order: the cap-matched arm 2 vs arm 3 re-run above (~$0.16
 total, and the only way to attribute the recorded delta), smaller chunks
