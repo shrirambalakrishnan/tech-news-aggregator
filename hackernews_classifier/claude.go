@@ -25,6 +25,13 @@ const (
 	// batch of stories (embeddings over profile/corpus). The caller fills
 	// UserProfile.RetrievedExcerpts before classifying.
 	ArmRAG Arm = 2
+	// ArmRAGPerStory classifies against the SAME kind of corpus excerpts as
+	// ArmRAG, retrieved differently: one query per story, pooled, instead of one
+	// blended query for the whole batch. It differs from ArmRAG in exactly one
+	// variable - how excerpts are selected - so a delta in the eval is
+	// attributable to retrieval and not to a changed prompt. The prompt is
+	// therefore deliberately shared with ArmRAG rather than written afresh.
+	ArmRAGPerStory Arm = 3
 )
 
 type StoryDetail struct {
@@ -40,17 +47,19 @@ type StoryDetail struct {
 type UserProfile struct {
 	Summary   string
 	Interests []string
-	// RetrievedExcerpts carries ArmRAG context: the top-k corpus chunks the
-	// caller retrieved for THIS batch of stories - not the corpus, and not a
+	// RetrievedExcerpts carries the retrieval arms' context: the corpus chunks
+	// the caller retrieved for THIS batch of stories - not the corpus, and not a
 	// cached copy of the index. Every element is inlined verbatim into the
 	// system prompt, so its length is the per-call token cost; that is why the
 	// caller retrieves a handful rather than loading profile/corpus_index.json
 	// (sending the whole corpus every 4h is the cost Approach 3 exists to
 	// avoid). Unlike Summary/Interests, which are built once per run, this is
 	// per classify call - the retrieval query is the batch's own titles.
-	// Only ArmRAG reads it: the arm, not this field's emptiness, selects the
-	// prompt, so each arm builds from exactly one context source and the arms
-	// stay comparable in the eval.
+	// Only ArmRAG and ArmRAGPerStory read it, and they read it identically: the
+	// arm, not this field's emptiness, selects the prompt, so each arm builds
+	// from exactly one context source and the arms stay comparable in the eval.
+	// The two differ only in how the caller filled this slice - ArmRAG from one
+	// blended query, ArmRAGPerStory from per-story queries pooled together.
 	RetrievedExcerpts []string
 }
 
@@ -69,15 +78,20 @@ var claudeMessageApiCall = claudeapi.ClaudeMessageApiCall
 // ConstructPromptSystemAttribute builds the classifier system prompt for the
 // chosen arm: ArmGeneric returns the static "technical computer science"
 // ruleset, ArmInterests classifies against the user's distilled interest
-// profile, and ArmRAG classifies against corpus excerpts retrieved for the
-// current batch. The arm drives the flow explicitly - neither the profile's
-// emptiness nor the presence of corpus chunks selects it - so each prompt is
-// built from exactly one context source and the arms stay comparable.
+// profile, and ArmRAG/ArmRAGPerStory classify against corpus excerpts retrieved
+// for the current batch. The arm drives the flow explicitly - neither the
+// profile's emptiness nor the presence of corpus chunks selects it - so each
+// prompt is built from exactly one context source and the arms stay comparable.
+//
+// ArmRAG and ArmRAGPerStory share a branch on purpose. They differ only in how
+// the excerpts were selected, which happens upstream in armcontext; giving arm 3
+// its own prompt would make any eval delta unattributable between "per-story
+// retrieval helped" and "we happened to write a better prompt".
 func ConstructPromptSystemAttribute(arm Arm, profile UserProfile) string {
 	switch arm {
 	case ArmInterests:
 		return interestsClassificationPrompt(profile)
-	case ArmRAG:
+	case ArmRAG, ArmRAGPerStory:
 		return ragClassificationPrompt(profile.RetrievedExcerpts)
 	default:
 		return staticClassificationPrompt()

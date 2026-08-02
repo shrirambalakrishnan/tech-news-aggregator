@@ -24,18 +24,23 @@ import (
 // fakes so building a profile never touches the disk or the network.
 var loadUserContext = profile.LoadUserContext
 var loadRagContext = rag.RetrieveContext
+var loadPooledRagContext = rag.RetrievePooledContext
 
 // BuildProfile returns the UserProfile the chosen arm classifies against, built
 // for THIS batch of stories.
 //
-//   - ArmGeneric   -> empty profile; the static ruleset needs no user data.
-//   - ArmInterests -> summary + interests from the distilled JSON.
-//   - ArmRAG       -> the top-k corpus excerpts retrieved for these stories.
+//   - ArmGeneric     -> empty profile; the static ruleset needs no user data.
+//   - ArmInterests   -> summary + interests from the distilled JSON.
+//   - ArmRAG         -> top-k corpus excerpts for one query blended from these
+//     stories' titles.
+//   - ArmRAGPerStory -> the same kind of excerpts, retrieved per story and
+//     pooled. Same corpus, same index, same prompt downstream: the arms differ
+//     in excerpt SELECTION only, which is what makes an eval delta attributable.
 //
-// The stories are the arm 2 retrieval query, which is why they are a parameter
-// rather than something the caller splices in afterwards: every arm's context is
-// built here, in one switch, so there is exactly one place that answers "what
-// does this arm classify against?".
+// The stories are the retrieval query for both retrieval arms, which is why they
+// are a parameter rather than something the caller splices in afterwards: every
+// arm's context is built here, in one switch, so there is exactly one place that
+// answers "what does this arm classify against?".
 //
 // Every failure is an error, never a degraded profile: an arm asked for must run
 // as that arm or not at all. Silently falling back (arm 2 -> arm 1 -> arm 0) is
@@ -69,6 +74,17 @@ func BuildProfile(arm hackernews_classifier.Arm, stories []hackernews_classifier
 		}
 		return hackernews_classifier.UserProfile{RetrievedExcerpts: excerpts}, nil
 
+	case hackernews_classifier.ArmRAGPerStory:
+		// One query per story instead of one blended query, pooled back down to
+		// RETRIEVAL_POOL_CAP chunks. The cap is what keeps this retrieval rather
+		// than long-context stuffing: without it, 30 stories x k chunks would
+		// grow the prompt with the batch size.
+		excerpts, err := loadPooledRagContext(retrievalQueries(stories))
+		if err != nil {
+			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 3 (RAG per-story): corpus retrieval failed (run `go run . embed`): %w", err)
+		}
+		return hackernews_classifier.UserProfile{RetrievedExcerpts: excerpts}, nil
+
 	default:
 		return hackernews_classifier.UserProfile{}, fmt.Errorf("unknown arm: %d", arm)
 	}
@@ -82,9 +98,24 @@ func BuildProfile(arm hackernews_classifier.Arm, stories []hackernews_classifier
 // CLAUDE.md, the retrieval-key problem): it biases retrieval toward context that
 // confirms the batch, so the eval watches FP/precision, not just recall.
 func retrievalQuery(stories []hackernews_classifier.StoryDetail) string {
+	return strings.Join(retrievalQueries(stories), "\n")
+}
+
+// retrievalQueries is arm 3's retrieval key: the batch's story titles as
+// separate queries, one per story, in batch order.
+//
+// It is the single difference between the two retrieval arms. Arm 2 averages the
+// whole batch into one query vector, so a title unlike the rest of the batch is
+// outvoted and gets no say in what is retrieved; arm 3 gives every title its own
+// query and pools the results, so a lone relevant story can still pull in the
+// chunks that support it. The confirmation-bias trade-off from arm 2 carries
+// over unchanged and is arguably sharper here - each story now retrieves its own
+// confirming context - which is why the eval watches FP/precision, not recall
+// alone.
+func retrievalQueries(stories []hackernews_classifier.StoryDetail) []string {
 	titles := make([]string, 0, len(stories))
 	for _, story := range stories {
 		titles = append(titles, story.Title)
 	}
-	return strings.Join(titles, "\n")
+	return titles
 }

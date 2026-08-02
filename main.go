@@ -14,8 +14,8 @@ import (
 	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
-// parseArm converts a CLI argument into an Arm. Only the valid arms (0, 1, 2)
-// are accepted; anything else errors so a typo can't silently fall through to a
+// parseArm converts a CLI argument into an Arm. Only the valid arms (0-3) are
+// accepted; anything else errors so a typo can't silently fall through to a
 // default flow.
 func parseArm(s string) (hackernews_classifier.Arm, error) {
 	n, err := strconv.Atoi(s)
@@ -23,10 +23,11 @@ func parseArm(s string) (hackernews_classifier.Arm, error) {
 		return 0, fmt.Errorf("invalid arm %q: must be an integer", s)
 	}
 	switch hackernews_classifier.Arm(n) {
-	case hackernews_classifier.ArmGeneric, hackernews_classifier.ArmInterests, hackernews_classifier.ArmRAG:
+	case hackernews_classifier.ArmGeneric, hackernews_classifier.ArmInterests,
+		hackernews_classifier.ArmRAG, hackernews_classifier.ArmRAGPerStory:
 		return hackernews_classifier.Arm(n), nil
 	default:
-		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG)", n)
+		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG, 3=RAG per-story)", n)
 	}
 }
 
@@ -45,7 +46,7 @@ func main() {
 //	go run . [arm]      -> classify (arm optional, defaults to 0)
 //	go run . eval <arm> -> eval     (arm REQUIRED)
 //	go run . prebuild   -> prebuild
-//	go run . embed      -> build the arm 2 (RAG) corpus index
+//	go run . embed      -> build the corpus index the RAG arms retrieve from
 //	go run . calibrate-floor -> pick rag.RETRIEVAL_SIMILARITY_FLOOR from measured scores
 func run(args []string) error {
 	godotenv.Load()
@@ -79,7 +80,7 @@ func runPrebuild() error {
 }
 
 // runEmbed chunks profile/corpus, embeds each chunk via Voyage, and writes
-// profile/corpus_index.json - the index arm 2 (RAG) retrieves from. Run
+// profile/corpus_index.json - the index the RAG arms (2 and 3) retrieve from. Run
 // occasionally, not every 4h; requires VOYAGE_API_KEY in env.
 func runEmbed() error {
 	rag.BuildCorpusIndex()
@@ -123,7 +124,7 @@ func runCalibrateFloor() error {
 // for one arm can't silently score another.
 func runEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG)")
+		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG, 3=RAG per-story)")
 	}
 	arm, err := parseArm(args[0])
 	if err != nil {
