@@ -133,42 +133,90 @@ type chunkKey struct {
 	ChunkIndex int
 }
 
-// poolChunks merges per-story results into one ranked list: dedupe, keeping the
-// highest score a chunk earned against any story, then order best-first and
-// truncate to poolCap. A chunk retrieved by several stories is stronger
-// evidence, not duplicated context — so it appears once, at its best score.
-//
-// Ties keep first-seen order (which follows the caller's story order), so the
-// same inputs always produce the same pool.
-func poolChunks(perStory [][]scoredChunk, poolCap int) []Chunk {
-	best := map[chunkKey]int{} // key -> position in pooled
-	var pooled []scoredChunk
+// scoredChunks is a ranked list of chunks with the score each earned during
+// retrieval. Pooling is a four-step pipeline over such a list, so each step is a
+// method that takes one list and returns a new one — letting poolChunks read as
+// the sequence of steps it is, and letting each step be understood (and tested)
+// on its own.
+type scoredChunks []scoredChunk
 
+// poolChunks merges the per-story retrieval results into one ranked list of
+// chunks to inject into the prompt. In order:
+//
+//  1. flatten                  — one list instead of one list per story
+//  2. dedupeKeepingBestScore   — each chunk appears once, at its best score
+//  3. sortedByScoreDesc        — best evidence first
+//  4. truncatedTo(poolCap)     — bound the prompt cost
+//
+// Steps 2 and 3 are where the semantics live: a chunk retrieved by several
+// stories is stronger evidence rather than duplicated context, so it survives
+// once and is ranked by its strongest match.
+func poolChunks(perStory [][]scoredChunk, poolCap int) []Chunk {
+	return flatten(perStory).
+		dedupeKeepingBestScore().
+		sortedByScoreDesc().
+		truncatedTo(poolCap).
+		chunks()
+}
+
+// flatten concatenates the per-story result lists into a single list, keeping
+// story order and, within a story, rank order. That ordering is what makes ties
+// deterministic downstream: equal scores keep first-seen position.
+func flatten(perStory [][]scoredChunk) scoredChunks {
+	pooled := scoredChunks{}
 	for _, results := range perStory {
-		for _, s := range results {
-			key := chunkKey{Source: s.chunk.Source, ChunkIndex: s.chunk.ChunkIndex}
-			if pos, seen := best[key]; seen {
-				if s.score > pooled[pos].score {
-					pooled[pos].score = s.score
-				}
-				continue
-			}
-			best[key] = len(pooled)
-			pooled = append(pooled, s)
+		pooled = append(pooled, results...)
+	}
+	return pooled
+}
+
+// dedupeKeepingBestScore collapses repeats of the same chunk into one entry
+// carrying the highest score it earned against any story. Position is the entry's
+// first appearance; only the score is updated by later hits.
+func (s scoredChunks) dedupeKeepingBestScore() scoredChunks {
+	positionOf := map[chunkKey]int{}
+	deduped := scoredChunks{}
+
+	for _, sc := range s {
+		key := chunkKey{Source: sc.chunk.Source, ChunkIndex: sc.chunk.ChunkIndex}
+		position, alreadyPooled := positionOf[key]
+		if !alreadyPooled {
+			positionOf[key] = len(deduped)
+			deduped = append(deduped, sc)
+			continue
+		}
+		if sc.score > deduped[position].score {
+			deduped[position].score = sc.score
 		}
 	}
+	return deduped
+}
 
-	sort.SliceStable(pooled, func(i, j int) bool { return pooled[i].score > pooled[j].score })
+// sortedByScoreDesc orders the list best-first, leaving the receiver untouched.
+// The sort is stable, so equal scores keep the order flatten established.
+func (s scoredChunks) sortedByScoreDesc() scoredChunks {
+	sorted := append(scoredChunks{}, s...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].score > sorted[j].score })
+	return sorted
+}
 
-	n := min(poolCap, len(pooled))
+// truncatedTo keeps at most n entries. A negative n is treated as 0.
+func (s scoredChunks) truncatedTo(n int) scoredChunks {
+	n = min(n, len(s))
 	if n < 0 {
 		n = 0
 	}
-	chunks := make([]Chunk, 0, n)
-	for _, s := range pooled[:n] {
-		chunks = append(chunks, s.chunk)
+	return s[:n]
+}
+
+// chunks drops the scores, which exist only to rank and dedupe — callers past
+// this point just need the chunks themselves.
+func (s scoredChunks) chunks() []Chunk {
+	out := make([]Chunk, 0, len(s))
+	for _, sc := range s {
+		out = append(out, sc.chunk)
 	}
-	return chunks
+	return out
 }
 
 // RetrievePooledContext is arm 3's retrieval: one query per story, each filtered
