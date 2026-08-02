@@ -11,10 +11,12 @@ A Go CLI that fetches HackerNews front-page stories, uses the Claude API to clas
 ```bash
 go run .                        # build + run, arm 0 (requires ANTHROPIC_API_KEY in env)
 go run . 1                      # run under arm 1 (interests; needs prebuild's JSON)
-go run . 2                      # run under arm 2 (RAG; needs embed's corpus index)
+go run . 2                      # run under arm 2 (RAG, one blended query; needs embed's corpus index)
+go run . 3                      # run under arm 3 (RAG, per-story retrieval; needs embed's corpus index)
 go run . prebuild               # extract GitHub interest profile -> profile/user_context.json (occasional)
 go run . embed                  # chunk+embed profile/corpus -> profile/corpus_index.json (requires VOYAGE_API_KEY; ~20 min on Voyage free tier)
-go run . eval 0                 # eval under a specific arm (arm is REQUIRED for eval; 0|1|2)
+go run . eval 0                 # eval under a specific arm (arm is REQUIRED for eval; 0|1|2|3)
+go run . calibrate-floor        # measure rag.RETRIEVAL_SIMILARITY_FLOOR from the labelled set (free; requires VOYAGE_API_KEY)
 go test ./...                   # run all tests
 go test ./hackernews_classifier/ -run TestClassifyTechNewsStory   # single test, single package
 ./tech-news-run.sh              # production entrypoint: pulls API key from macOS Keychain, then `go run .` (arm 0)
@@ -27,7 +29,7 @@ CI (`.github/workflows/test.yml`) runs `go test ./...` on pushes/PRs to `main`. 
 | Name | Type | Read by | Where it lives |
 |------|------|---------|----------------|
 | `ANTHROPIC_API_KEY` | secret | `claudeapi` (`os.Getenv`) — every Claude call | macOS Keychain |
-| `VOYAGE_API_KEY` | secret | `voyageapi` (`os.Getenv`) — the `go run . embed` step only | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | `voyageapi` (`os.Getenv`) — the `embed` and `calibrate-floor` steps, and every arm 2/3 run | macOS Keychain |
 | `GITHUB_USERNAME` | non-secret | `profile/github.go` (`os.Getenv`) — whose READMEs to fetch | `.env` (see `.env.example`) |
 
 For local runs export the keys directly; in production `tech-news-run.sh` fetches secrets from the macOS Keychain (`security find-generic-password -a "$USER" -s <NAME> -w`) and exports them before `go run .`. **The runner exports only `ANTHROPIC_API_KEY`** — `VOYAGE_API_KEY` is needed only by the one-off `go run . embed` step (not the 4-hourly run), so export it manually for that: `export VOYAGE_API_KEY=$(security find-generic-password -a "$USER" -s VOYAGE_API_KEY -w)`. See README.md for the Keychain + launchd install steps.
@@ -38,8 +40,12 @@ For local runs export the keys directly; in production `tech-news-run.sh` fetche
 explicit `arm` argument, not by what happens to be on disk. `main.parseArm`
 validates the CLI arg; `arm 0` = generic/static prompt with no profile (the
 production default, kept for cron-safety), `arm 1` = interests injected from the
-distilled JSON, `arm 2` = RAG (corpus chunks retrieved from the embed step's
-index; live in **both** the classify path and `evalHarness`). Every arm's context
+distilled JSON, `arm 2` = RAG with one query blended from the batch's titles,
+`arm 3` = RAG with one query **per story**, pooled (both retrieve from the embed
+step's index and are live in **both** the classify path and `evalHarness`).
+Arms 2 and 3 share the same corpus, index and prompt and differ in excerpt
+**selection** only — deliberately, so an eval delta is attributable to retrieval
+rather than to prompt wording. Every arm's context
 is built by **one shared function**, `armcontext.BuildProfile(arm, stories)`,
 which returns the arm's `UserProfile` and **errors (non-zero exit) when the arm's
 data is missing** — it does *not* fail soft to arm 0. The `stories` parameter is
@@ -62,9 +68,18 @@ Pipeline (entry point `main.go` → `GetMyHackerNewsStories(arm)`):
 3. **`claudeapi` package**: thin Anthropic Messages API client (`POST /v1/messages`). Model and request shape are hardcoded here (`ANTHROPIC_MODEL_NAME`).
 4. **`profile` package**: fetches a GitHub user's repos and their READMEs (`github.go`), then extracts an interest profile from them via the LLM and reads/writes `profile/user_context.json` (`context.go`). Wired in as a **prebuild step**: `go run . prebuild` calls `ExtractGithubProfile()` and exits; the normal run skips it.
 5. **`voyageapi` package** (Approach 3): thin Voyage AI embeddings client (`POST /v1/embeddings`), mirroring `claudeapi`. `EmbedDocuments([]string) ([][]float32, error)` token-batches inputs and **paces requests for Voyage's no-payment tier** (3 RPM / 10K TPM): token-bounded batches, an inter-request delay, and 429 retry-with-backoff (all tunable package vars). Reads `VOYAGE_API_KEY`. Organized **one file per layer**: `voyage.go` (PUBLIC API: `EmbedDocuments` + the `embedBatch` DI seam), `ratelimit.go` (POLICY: free-tier config vars, `planBatches`, `pacingDelay`, retry), `client.go` (TRANSPORT: wire types + `embedBatchHTTP`).
-6. **`rag` package** (Approach 3): organized **one file per pipeline stage** — `corpus.go` is the INPUT stage (`CORPUS_DIR`, `readCorpusFiles`, `inferType`; types are stamped at read time so later stages never inspect filenames); `chunk.go` is the TRANSFORM stage (pure `ChunkText(text, window, overlap)`, fixed-size word windows, 800/120); `index.go` is the OUTPUT stage (the `CorpusIndex` artifact: provenance metadata + `[]Chunk`, with `Write`/`LoadCorpusIndex`); `build.go` is the PIPELINE (the `embedDocuments` DI seam, `buildIndex`, and `BuildCorpusIndex()` orchestrating read `profile/corpus/` → chunk → embed → write `profile/corpus_index.json`); `retrieve.go` is the RETRIEVAL stage (pure `cosineSimilarity` + `topKBySimilarity`, and `RetrieveContext(query, k)` = load index → embed query via `voyageapi.EmbedQuery` → top-k chunk texts; `RETRIEVAL_TOP_K` = 5). Wired as the **embed step**: `go run . embed`. Index is git-ignored (regenerable, like `user_context.json`), but under explicit arm selection a **missing index is fatal for arm 2** rather than fail-soft — see Approach 3 below. **Retrieval is wired into both the classify path and the eval arm.**
+6. **`rag` package** (Approach 3): organized **one file per pipeline stage** — `corpus.go` is the INPUT stage (`CORPUS_DIR`, `readCorpusFiles`, `inferType`; types are stamped at read time so later stages never inspect filenames); `chunk.go` is the TRANSFORM stage (pure `ChunkText(text, window, overlap)`, fixed-size word windows, 800/120); `index.go` is the OUTPUT stage (the `CorpusIndex` artifact: provenance metadata + `[]Chunk`, with `Write`/`LoadCorpusIndex`); `build.go` is the PIPELINE (the `embedDocuments` DI seam, `buildIndex`, and `BuildCorpusIndex()` orchestrating read `profile/corpus/` → chunk → embed → write `profile/corpus_index.json`); `retrieve.go` is the RETRIEVAL stage (pure `cosineSimilarity` + `topKBySimilarity`, and `RetrieveContext(query, k)` = load index → embed query via `voyageapi.EmbedQuery` → top-k chunk texts; `RETRIEVAL_TOP_K` = 5). `retrieve.go` also holds arm 3's per-story path:
+`RetrievePooledContext(queries)` embeds all queries in **one** Voyage request
+(`voyageapi.EmbedQueries`), takes `RETRIEVAL_TOP_K_PER_STORY` (2) chunks per
+story via `topKAboveFloor`, then `poolChunks` = flatten → dedupe keeping each
+chunk's best score (CombMAX, keyed on `{Source, ChunkIndex}`) → sort desc →
+truncate to `RETRIEVAL_POOL_CAP` (20). The cap is what keeps arm 3 retrieval
+rather than long-context stuffing: without it the prompt grows with the batch
+size. `RETRIEVAL_SIMILARITY_FLOOR` ships at **0.0 and is inert** — see Approach 4
+below. `TopScoresPerQuery(queries, k)` exposes the raw scores for calibration
+without exporting `cosineSimilarity`. Wired as the **embed step**: `go run . embed`. Index is git-ignored (regenerable, like `user_context.json`), but under explicit arm selection a **missing index is fatal for arm 2** rather than fail-soft — see Approach 3 below. **Retrieval is wired into both the classify path and the eval arm.**
 
-7. **`armcontext` package**: the single place that answers "what does this arm classify against?". `BuildProfile(arm, stories)` switches on the arm — empty profile for arm 0, the distilled summary/interests for arm 1, the excerpts `rag.RetrieveContext` returns for arm 2 — and errors (never a degraded profile) when the arm's artifact is missing. `retrievalQuery` (unexported) owns arm 2's retrieval key: the batch's titles, newline-joined. It exists so `main` and `evalHarness` share one implementation instead of two copies that must be kept in sync for the eval's numbers to transfer; both reach it through a `buildProfileForArm` DI var, which is also what their tests swap (per-arm construction is tested once, in `armcontext`).
+7. **`armcontext` package**: the single place that answers "what does this arm classify against?". `BuildProfile(arm, stories)` switches on the arm — empty profile for arm 0, the distilled summary/interests for arm 1, the excerpts `rag.RetrieveContext` returns for arm 2, the pooled excerpts `rag.RetrievePooledContext` returns for arm 3 — and errors (never a degraded profile) when the arm's artifact is missing. `retrievalQuery` (unexported) owns arm 2's retrieval key: the batch's titles, newline-joined; `retrievalQueries` owns arm 3's: the same titles as a **slice**, one query each. That one-line difference is the entire distinction between the two arms. It exists so `main` and `evalHarness` share one implementation instead of two copies that must be kept in sync for the eval's numbers to transfer; both reach it through a `buildProfileForArm` DI var, which is also what their tests swap (per-arm construction is tested once, in `armcontext`).
 
 Packages depend downward only: `main` → `hackernews_classifier` → `claudeapi`, `main` → `profile` → `claudeapi`, `main` → `rag` → `voyageapi`, and `main`/`evalHarness` → `armcontext` → `{hackernews_classifier, profile, rag}`.
 
@@ -140,4 +155,20 @@ Offline eval of the classifier against a hand-labelled dataset, to measure class
 
 > ⚠️ **Voyage pacing gap in the arm 2 eval (known, unfixed).** `EmbedQuery` has 429 retry-with-backoff but — unlike `EmbedDocuments` — applies **no** `VOYAGE_MIN_REQUEST_GAP` pacing between calls, because production only ever makes *one* retrieval call per run. The eval makes **12 back-to-back**, which on the free tier (3 RPM) means calls 4+ get 429'd and self-pace via linear backoff (30s, 60s, …, `VOYAGE_MAX_RETRIES` = 6). It completes, but takes several minutes with wasted round trips. Fix when it becomes annoying: either sleep `VOYAGE_MIN_REQUEST_GAP` between eval retrievals, or move min-gap pacing into `voyageapi` so it applies to queries too. Unaffected if a payment method is on the Voyage account.
 
-**Follow-ups (eval v2):** arm 2 has been scored, but the cross-arm comparison is still three single runs. Sharpen it when a ranking decision depends on it — add F1 as one cross-arm score, run each arm k times for mean ± stddev (the LLM is non-deterministic), and keep watching **FP/precision** for the retrieval-key confirmation-bias failure mode.
+**Follow-ups (eval v2):** the cross-arm comparison is still one run per arm. Sharpen it when a ranking decision depends on it — add F1 as one cross-arm score, run each arm k times for mean ± stddev (the LLM is non-deterministic), and keep watching **FP/precision** for the retrieval-key confirmation-bias failure mode.
+
+## Approach 4 — per-story RAG retrieval (built + evaluated; did not beat Approach 3)
+
+**Status: built, scored, and the hypothesis was rejected.** Arm 3 retrieves per story and pools instead of blending the batch into one query. It is a strict single-variable change from arm 2 — same corpus, same index, same `ragClassificationPrompt`, same one-Claude-call-per-batch shape — so any delta is attributable to retrieval alone. `ConstructPromptSystemAttribute` shares one branch (`case ArmRAG, ArmRAGPerStory:`) and a test asserts the two prompts are byte-identical, so they cannot drift.
+
+**Result: 10 TP / 63 FP / 25 FN → precision 0.1370, recall 0.2857.** Both acceptance targets from issue #19 (FP ≤ 35, recall ≥ 0.40) missed. Arm 3 flagged 73 stories vs arm 2's 84; of the 11 it stopped flagging, 4 were relevant — a 36% hit rate among the dropped, against 17% across arm 2's flagged set, i.e. it pruned the *better* part of the set. **But the gap is inside the noise:** at 35 positives the standard error on recall is ~8pp and the difference is ~11pp (~1.4 SE). The defensible claim is "arm 3 is not better", not "arm 3 is worse".
+
+**Why, diagnosed before the eval rather than after.** `calibrate-floor` measured **AUC 0.659, d′ 0.635** over the labelled set: relevant and irrelevant stories' best-chunk scores overlap heavily (class overlap, *not* the embedding cone effect — the range 0.09–0.51 is wide, not compressed). Arms 2 and 3 select from that same weak ranking and differ only in *how*; no selection strategy rescues a ranking that barely separates the classes. **Transferable lesson: measure retrieval ranking quality (free, no Claude call) before building selection strategies on top of it.**
+
+**Floor calibration (`go run . calibrate-floor`, `evalHarness/calibrate_floor.go` + `floor_verdict.go`).** Scores every labelled title against the index and prints distribution + survival tables, then a **verdict** section: AUC/d′ against named reading points, the best floor from a fine sweep over every observed score, the interaction with `RETRIEVAL_POOL_CAP`, and a recommended value with its reason. One Voyage request per 128 titles, no Claude call, $0.00. The verdict section was added *after* the first run, when the tables alone proved insufficient to act on — the numbers had to be re-analysed by hand, leaving the conclusion unreproducible, which defeats the point of measuring instead of guessing.
+
+> **`RETRIEVAL_SIMILARITY_FLOOR` is 0.0 and INERT, not tested.** The best floor available (0.2336) sits *below* the ~0.32 that `RETRIEVAL_POOL_CAP = 20` already enforces by truncation, so no value both fires and helps: below it changes nothing, above it cuts into positives. Arm 3's numbers therefore measure per-story retrieval + pooling with floor-filtering never in effect. **Design lesson: before adding a knob, check whether an existing one already dominates it** — the cap is a relative threshold and was doing the floor's job all along.
+
+**Cost:** ~$0.29 per `eval 3` (~290K input tokens: 20 pooled chunks ≈ 23K tokens per call × 12 calls), against ~$0.08 for arm 2 (5 chunks) and ~$0.016 for arms 0/1. Voyage is $0.00 (12 requests, ~4.6K tokens, free tier), but the eval's 12 back-to-back retrievals hit the 3 RPM limit and self-pace via backoff — several minutes.
+
+**Next levers, in cost order:** smaller chunks (currently 800 words — a ~9-word title averaged against an 800-word window dilutes the signal; re-testing at the retrieval layer via `calibrate-floor` is free), wider corpus coverage (recently-read blogs), then reranking — evaluated first as a scoring function (AUC on a subsample, no Claude call) before any arm is wired. Note that re-chunking invalidates arm 2's baseline, so both arms must be re-run together to keep the comparison honest.

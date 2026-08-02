@@ -92,6 +92,7 @@ When the script tries to filter the interested news items
 | `0` | none | generic/static "technical CS" prompt | never — production default |
 | `1` | `summary` + `interests` from `profile/user_context.json` | interests injected into the prompt | the distilled JSON is missing (run `prebuild` first) |
 | `2` | top-k corpus excerpts retrieved for the batch being classified | excerpts inlined into the prompt as evidence of the reader's interests | `profile/corpus_index.json` is missing, or retrieval fails (run `embed` first) |
+| `3` | corpus excerpts retrieved **per story** and pooled, capped at `RETRIEVAL_POOL_CAP` | identical to arm 2 — same prompt, same corpus, same index; only excerpt *selection* differs | same as arm 2 |
 
 ```bash
 # Approach 1
@@ -107,24 +108,78 @@ go run . eval 1         # eval under arm 1
 go run . embed          # regenerate profile/corpus_index.json (see below)
 go run . 2              # normal run, arm 2 (RAG) — needs embed's corpus index
 go run . eval 2         # eval under arm 2 — slow on Voyage's free tier, see below
+
+# Approach 4
+go run . calibrate-floor > scores.csv   # measure rag.RETRIEVAL_SIMILARITY_FLOOR (free, no Claude call)
+go run . 3              # normal run, arm 3 (RAG, per-story retrieval)
+go run . eval 3         # eval under arm 3 — same free-tier throttling as arm 2
 ```
 
 ## Eval - Execution results
 
+341 labelled stories, 35 relevant (~10% base rate). One run per arm — the model is
+non-deterministic, so these are point estimates, not settled values.
+
+Columns are labelled by **arm** (the CLI argument), since the "Approach N" numbering
+above is offset by one and would collide here.
+
 #### Confusion matrix
-| Metric | Approach 0 | Approach 1 | Approach 2 |
-|--|--|--|--|
-| TP (hit, flagged & relevant) | 14 | 4 | 14 |
-| FP (false alarm, flagged but dud) | 120 | 8 | 70 |
-| TN (correct skip) | 186 | 298 | 236 |
-| FN (miss, skipped but relevant) | 21 | 31 | 21 |
+| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) |
+|--|--|--|--|--|
+| TP (hit, flagged & relevant) | 14 | 4 | 14 | 10 |
+| FP (false alarm, flagged but dud) | 120 | 8 | 70 | 63 |
+| TN (correct skip) | 186 | 298 | 236 | 243 |
+| FN (miss, skipped but relevant) | 21 | 31 | 21 | 25 |
 
 #### Metrics
 
-| Metric | Approach 0 | Approach 1 | Approach 2 |
-|--|--|--|--|
-| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 |
-| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 |
+| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) |
+|--|--|--|--|--|
+| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 |
+| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 |
+
+#### Reading the results
+
+**Arm 3 did not beat arm 2.** It missed both acceptance targets set in issue #19
+(FP ≤ 35, recall ≥ 0.40): FP came in at 63 and recall at 0.2857.
+
+It flagged 73 stories against arm 2's 84. Of the 11 it stopped flagging, **4 were
+relevant and 7 were not** — a 36% hit rate among the dropped stories, against the
+17% hit rate of arm 2's flagged set overall. Per-story retrieval pruned the
+*right-leaning* part of the flagged set, which is the opposite of what a better
+context should do.
+
+**That said, the gap is inside the noise.** With 35 positives, the standard error
+on recall is about 8 percentage points; the arm 2 → arm 3 difference is 11 points,
+roughly 1.4 standard errors. The defensible claim is **"arm 3 is not better"**, not
+"arm 3 is worse". Separating those would need several runs per arm.
+
+**Why it did not work — measured before the eval, not after.** `calibrate-floor`
+scored every labelled title against the corpus and found **AUC 0.659, d′ 0.635**:
+relevant and irrelevant stories' best-chunk scores overlap heavily. Arms 2 and 3
+both select from that same weak ranking and differ only in *how* they select. No
+selection strategy can rescue a ranking that barely separates the two classes, so
+the ceiling was already visible in the retrieval statistics.
+
+**`RETRIEVAL_SIMILARITY_FLOOR` shipped at 0.0 and is inert, not tested.** The best
+floor available (0.2336) sits *below* the ~0.32 that `RETRIEVAL_POOL_CAP = 20`
+already enforces by truncation, so no floor both fires and helps. Arm 3's numbers
+therefore measure per-story retrieval plus pooling, with floor-filtering never in
+effect.
+
+**Standing conclusions.** Arm 2 dominates arm 0 — identical recall (0.4000) at
+**60% fewer false positives** (70 vs 120) — so blended-query retrieval does pay
+for itself over the static ruleset. Arm 1 remains the precision leader (0.3333
+against a 10% base rate) at the worst recall by far, so the choice between arms 1
+and 2 is still a precision/recall preference, not a quality ranking. Arm 3 adds
+nothing over arm 2 and costs ~3.5× as much per eval run (~$0.29 vs ~$0.08, since
+20 pooled chunks go into every prompt instead of 5).
+
+Next levers, in cost order: smaller chunks (currently 800 words — a ~9-word title
+averaged against an 800-word window dilutes the signal, and re-testing at the
+retrieval layer via `calibrate-floor` is free), wider corpus coverage, then
+reranking — evaluated first as a scoring function (AUC on a subsample) before any
+arm is wired.
 
 ## Setup
 
