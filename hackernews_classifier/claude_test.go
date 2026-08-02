@@ -111,6 +111,22 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 		}
 	})
 
+	// Given the same excerpts, both retrieval arms must render the same prompt:
+	// if the wording ever diverges, an eval delta stops being attributable to
+	// retrieval. Note what this does NOT prove - it passes one fixed profile to
+	// both arms, so it says nothing about how many excerpts each arm actually
+	// supplies. That volume differs (5 vs up to 20) and is pinned separately by
+	// rag.TestRetrievalArmsInjectDifferentExcerptVolumes.
+	t.Run("builds the identical prompt for ArmRAGPerStory", func(t *testing.T) {
+		profile := UserProfile{
+			RetrievedExcerpts: []string{"TrueTime bounds clock uncertainty", "Raft elects a single leader"},
+		}
+
+		if got, want := ConstructPromptSystemAttribute(ArmRAGPerStory, profile), ConstructPromptSystemAttribute(ArmRAG, profile); got != want {
+			t.Fatalf("arm 3 prompt differs from arm 2's:\ngot  %s\nwant %s", got, want)
+		}
+	})
+
 	// The arm - not the presence of RetrievedExcerpts - selects the flow, so a
 	// profile carrying both must still yield exactly its arm's prompt.
 	t.Run("ignores retrieved excerpts for ArmInterests", func(t *testing.T) {

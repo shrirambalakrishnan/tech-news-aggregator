@@ -11,6 +11,7 @@ func TestParseArm(t *testing.T) {
 		"0": hackernews_classifier.ArmGeneric,
 		"1": hackernews_classifier.ArmInterests,
 		"2": hackernews_classifier.ArmRAG,
+		"3": hackernews_classifier.ArmRAGPerStory,
 	}
 	for in, want := range valid {
 		got, err := parseArm(in)
@@ -22,7 +23,7 @@ func TestParseArm(t *testing.T) {
 		}
 	}
 
-	for _, in := range []string{"", "abc", "-1", "3", "1.0"} {
+	for _, in := range []string{"", "abc", "-1", "4", "1.0"} {
 		if _, err := parseArm(in); err == nil {
 			t.Fatalf("parseArm(%q) expected error, got nil", in)
 		}

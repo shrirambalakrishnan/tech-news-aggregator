@@ -2,6 +2,7 @@ package armcontext
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
-// stubLoaders points both DI seams at fakes that fail the test if called, and
+// stubLoaders points every DI seam at fakes that fail the test if called, and
 // restores them afterwards. Each subtest then overrides only the seam its arm is
 // allowed to touch - so "arm 0 must not load anything" is enforced by default
 // rather than asserted case by case.
@@ -25,10 +26,15 @@ func stubLoaders(t *testing.T) {
 		t.Fatalf("this arm must not retrieve corpus context")
 		return nil, nil
 	}
+	loadPooledRagContext = func(queries []string) ([]string, error) {
+		t.Fatalf("this arm must not retrieve pooled corpus context")
+		return nil, nil
+	}
 
 	t.Cleanup(func() {
 		loadUserContext = profile.LoadUserContext
 		loadRagContext = rag.RetrieveContext
+		loadPooledRagContext = rag.RetrievePooledContext
 	})
 }
 
@@ -111,8 +117,16 @@ func TestBuildProfileArmRAG(t *testing.T) {
 		if gotQuery != "story1\nstory2" {
 			t.Errorf("retrieval query = %q, want the batch titles newline-joined", gotQuery)
 		}
+		// This k is also the arm 2 half of the excerpt-volume confound README and
+		// CLAUDE.md document: arm 2 asks for RETRIEVAL_TOP_K excerpts, arm 3 is
+		// bounded by rag.RETRIEVAL_POOL_CAP, and the gap is a second variable
+		// between the arms. Raising this k is one of the two ways to close that
+		// gap (equalizing the constants is the other, pinned by
+		// rag.TestRetrievalArmsInjectDifferentExcerptVolumes) - so if this fails
+		// after a deliberate de-confound, the eval numbers and the confound
+		// caveats in README/CLAUDE.md both need revisiting, not just this line.
 		if gotK != rag.RETRIEVAL_TOP_K {
-			t.Errorf("k = %d, want RETRIEVAL_TOP_K (%d)", gotK, rag.RETRIEVAL_TOP_K)
+			t.Errorf("k = %d, want RETRIEVAL_TOP_K (%d); if this was a deliberate de-confound, re-run eval 2 and eval 3 and update the confound caveats in README/CLAUDE.md", gotK, rag.RETRIEVAL_TOP_K)
 		}
 		if len(p.RetrievedExcerpts) != 2 || p.RetrievedExcerpts[0] != "chunk about spanner" {
 			t.Errorf("expected the retrieved chunks on the profile, got %+v", p.RetrievedExcerpts)
@@ -129,6 +143,51 @@ func TestBuildProfileArmRAG(t *testing.T) {
 		}
 
 		_, err := BuildProfile(hackernews_classifier.ArmRAG, testStories)
+		if err == nil {
+			t.Fatal("expected an error when retrieval fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "embed") {
+			t.Errorf("error should point at the fix (`go run . embed`), got %q", err)
+		}
+	})
+}
+
+func TestBuildProfileArmRAGPerStory(t *testing.T) {
+	t.Run("retrieves one query per story", func(t *testing.T) {
+		stubLoaders(t)
+		var gotQueries []string
+		loadPooledRagContext = func(queries []string) ([]string, error) {
+			gotQueries = queries
+			return []string{"chunk about raft", "chunk about spanner"}, nil
+		}
+
+		p, err := BuildProfile(hackernews_classifier.ArmRAGPerStory, testStories)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// The whole difference between arms 2 and 3: separate queries, not one
+		// blended string. If these ever collapse into one, arm 3 silently
+		// becomes arm 2 and the comparison measures nothing.
+		want := []string{"story1", "story2"}
+		if !reflect.DeepEqual(gotQueries, want) {
+			t.Errorf("retrieval queries = %v, want one per story %v", gotQueries, want)
+		}
+		if len(p.RetrievedExcerpts) != 2 || p.RetrievedExcerpts[0] != "chunk about raft" {
+			t.Errorf("expected the pooled chunks on the profile, got %+v", p.RetrievedExcerpts)
+		}
+		if p.Summary != "" || len(p.Interests) != 0 {
+			t.Errorf("arm 3 must carry no distilled context, got %+v", p)
+		}
+	})
+
+	t.Run("errors when retrieval fails", func(t *testing.T) {
+		stubLoaders(t)
+		loadPooledRagContext = func(queries []string) ([]string, error) {
+			return nil, errors.New("corpus index unavailable")
+		}
+
+		_, err := BuildProfile(hackernews_classifier.ArmRAGPerStory, testStories)
 		if err == nil {
 			t.Fatal("expected an error when retrieval fails, got nil")
 		}
