@@ -149,12 +149,29 @@ func TestPoolChunks(t *testing.T) {
 // is gone, but the recorded arm 2 vs arm 3 numbers were measured under the old
 // ones. Re-run both arms and drop the confound caveats from README/CLAUDE.md
 // before deleting this test.
+//
+// It guards ONE of the two ways the gap can close: changing the constants. The
+// other - changing the k arm 2 asks for, at the call site in armcontext - is
+// invisible here, because that k is armcontext's choice and rag cannot import
+// armcontext. TestRetrievalArmsRequestDifferentExcerptBudgets covers that side.
 func TestRetrievalArmsInjectDifferentExcerptVolumes(t *testing.T) {
+	// A production-sized batch: HACKERNEWS_HITS_PER_PAGE / EVAL_BATCH_SIZE is 30.
+	const batchSize = 30
+
+	// Each one-hot query claims one chunk of its own, so the pool holds ~batchSize
+	// distinct chunks. A cap at or above that can never bind here - the fixture
+	// runs out of chunks first, which would fail below as if production were
+	// broken. Say so plainly instead.
+	if RETRIEVAL_POOL_CAP >= batchSize {
+		t.Fatalf("fixture limitation, not a production bug: a %d-story one-hot batch yields ~%d distinct chunks, too few for a cap of %d to bind. Widen the fixture (more queries than the cap), then re-run.",
+			batchSize, batchSize, RETRIEVAL_POOL_CAP)
+	}
+
 	// One chunk per dimension, so a one-hot query scores exactly one chunk at
-	// 1.0 and every other at 0.0 - enough distinct chunks that pooling 30
-	// stories x RETRIEVAL_TOP_K_PER_STORY overflows RETRIEVAL_POOL_CAP, which is
-	// the condition the scored eval run was in.
-	const chunkCount = 64
+	// 1.0 and every other at 0.0 - enough distinct chunks that pooling
+	// batchSize stories x RETRIEVAL_TOP_K_PER_STORY overflows
+	// RETRIEVAL_POOL_CAP, which is the condition the scored eval run was in.
+	chunkCount := 2 * batchSize
 	chunks := make([]Chunk, 0, chunkCount)
 	for i := 0; i < chunkCount; i++ {
 		embedding := make([]float32, chunkCount)
@@ -178,8 +195,6 @@ func TestRetrievalArmsInjectDifferentExcerptVolumes(t *testing.T) {
 	defer func() { loadCorpusIndex, embedQuery, embedQueries = originalLoad, originalQuery, originalQueries }()
 	loadCorpusIndex = func(path string) (CorpusIndex, error) { return index, nil }
 
-	// A production-sized batch: HACKERNEWS_HITS_PER_PAGE / EVAL_BATCH_SIZE is 30.
-	const batchSize = 30
 	queries := make([]string, 0, batchSize)
 	for i := 0; i < batchSize; i++ {
 		queries = append(queries, fmt.Sprintf("story %d", i))

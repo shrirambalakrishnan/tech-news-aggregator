@@ -189,6 +189,46 @@ func TestBuildProfileArmRAGPerStory(t *testing.T) {
 	})
 }
 
+// The two retrieval arms were designed to differ in excerpt SELECTION only, but
+// they also differ in excerpt VOLUME - arm 2 asks for rag.RETRIEVAL_TOP_K (5),
+// arm 3 is bounded by rag.RETRIEVAL_POOL_CAP (20). Since excerpts are inlined
+// verbatim into the prompt, that makes arm 3's prompt several times larger, and
+// prompt size is its own plausible cause of an eval delta. README and CLAUDE.md
+// document the confound; this pins it so the code cannot drift away from them.
+//
+// This is the half of the invariant that lives HERE: arm 2's k is chosen at this
+// call site, so de-confounding by editing the argument (rag.RETRIEVAL_TOP_K ->
+// rag.RETRIEVAL_POOL_CAP) is visible only from armcontext. The other half -
+// equalizing the constants themselves - is pinned by
+// rag.TestRetrievalArmsInjectDifferentExcerptVolumes. Neither test sees both
+// routes, which is why there are two.
+//
+// The k asserted on is the one production passes, captured from the real
+// BuildProfile call rather than supplied by the fake, so this cannot pass by
+// agreeing with itself.
+func TestRetrievalArmsRequestDifferentExcerptBudgets(t *testing.T) {
+	stubLoaders(t)
+
+	requestedK := -1
+	loadRagContext = func(query string, k int) ([]string, error) {
+		requestedK = k
+		return []string{"excerpt"}, nil
+	}
+
+	if _, err := BuildProfile(hackernews_classifier.ArmRAG, testStories); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if requestedK != rag.RETRIEVAL_TOP_K {
+		t.Errorf("arm 2 requested k = %d, want rag.RETRIEVAL_TOP_K = %d", requestedK, rag.RETRIEVAL_TOP_K)
+	}
+	// Arm 3 has no k argument: rag.RetrievePooledContext reads the cap itself, so
+	// the cap IS arm 3's excerpt budget as seen from this call site.
+	if requestedK == rag.RETRIEVAL_POOL_CAP {
+		t.Fatalf("both retrieval arms now budget %d excerpts; if this was a deliberate de-confound, re-run eval 2 and eval 3 and drop the confound caveats from README/CLAUDE.md before deleting this test", requestedK)
+	}
+}
+
 func TestBuildProfileUnknownArm(t *testing.T) {
 	stubLoaders(t)
 

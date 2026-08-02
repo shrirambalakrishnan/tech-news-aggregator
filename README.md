@@ -158,12 +158,15 @@ roughly 1.4 standard errors. The defensible claim is **"arm 3 is not better"**, 
 intended as a single-variable change (excerpt *selection*), and the prompt
 template is genuinely shared — a test asserts the two arms render byte-identical
 prompts from the same excerpts, so prompt *wording* is ruled out. Prompt *size* is
-not: arm 2 injects `RETRIEVAL_TOP_K` = 5 excerpts, arm 3 up to
-`RETRIEVAL_POOL_CAP` = 20, and the cost of the scored run (~290K input tokens over
-12 calls ≈ 24K per call) shows the cap was binding. Every excerpt is ~800 words
-inlined verbatim, so arm 3's prompt was roughly 4× arm 2's — and dilution and
-position effects in long stuffed contexts are a well-documented cause of exactly
-the kind of recall drop observed. **So the recorded delta cannot distinguish
+not: arm 2 injects exactly `RETRIEVAL_TOP_K` = 5 excerpts, arm 3 **up to**
+`RETRIEVAL_POOL_CAP` = 20. Every excerpt is ~800 words inlined verbatim, so arm
+3's prompt was larger — by up to 4×, and dilution and position effects in long
+stuffed contexts are a well-documented cause of exactly the kind of recall drop
+observed. *How much* larger is not actually recorded: the per-call token figure
+below is arithmetic **assuming** 20 chunks, not a measurement, so it cannot be
+cited as evidence the cap bound, and `calibrate-floor`'s pool-cap section is
+dedupe-blind. Only a `count_tokens` call or a dedupe-aware re-run settles it. The
+confound holds either way — 5 against "up to 20" differs regardless. **So the recorded delta cannot distinguish
 "per-story retrieval didn't help" from "the bigger prompt hurt".** The conclusion
 that survives regardless is the one from the retrieval statistics below (AUC
 0.659): the ranking both arms select from barely separates the classes.

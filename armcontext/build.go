@@ -107,7 +107,9 @@ func retrievalQuery(stories []hackernews_classifier.StoryDetail) string {
 // retrievalQueries is arm 3's retrieval key: the batch's story titles as
 // separate queries, one per story, in batch order.
 //
-// It is the single difference between the two retrieval arms. Arm 2 averages the
+// It is the intended difference between the two retrieval arms - though not the
+// only one in practice, since they also inject different numbers of excerpts
+// (see BuildProfile). Arm 2 averages the
 // whole batch into one query vector, so a title unlike the rest of the batch is
 // outvoted and gets no say in what is retrieved; arm 3 gives every title its own
 // query and pools the results, so a lone relevant story can still pull in the
