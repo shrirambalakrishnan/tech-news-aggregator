@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 func TestPercentile(t *testing.T) {
@@ -156,13 +158,14 @@ func fakeDataset(t *testing.T) []LabelledStory {
 func TestCalibrateFloor(t *testing.T) {
 	t.Run("scores every labelled title and writes both outputs", func(t *testing.T) {
 		dataset := fakeDataset(t)
-		originalScorer := bestSimilarityPerQuery
-		defer func() { bestSimilarityPerQuery = originalScorer }()
+		originalScorer := topScoresPerQuery
+		defer func() { topScoresPerQuery = originalScorer }()
 
 		var gotTitles []string
-		bestSimilarityPerQuery = func(queries []string) ([]float64, error) {
-			gotTitles = queries
-			return []float64{0.8, 0.2}, nil
+		var gotK int
+		topScoresPerQuery = func(queries []string, k int) ([][]float64, error) {
+			gotTitles, gotK = queries, k
+			return [][]float64{{0.8, 0.7}, {0.2, 0.1}}, nil
 		}
 
 		var csvOut, reportOut bytes.Buffer
@@ -173,23 +176,47 @@ func TestCalibrateFloor(t *testing.T) {
 		if want := []string{"a relevant story", "an irrelevant story"}; !reflect.DeepEqual(gotTitles, want) {
 			t.Errorf("titles embedded = %v, want one query per labelled story %v", gotTitles, want)
 		}
+		// The pool-cap simulation replays what each story contributes, so
+		// calibration must ask for the same k retrieval uses.
+		if gotK != rag.RETRIEVAL_TOP_K_PER_STORY {
+			t.Errorf("k = %d, want RETRIEVAL_TOP_K_PER_STORY = %d", gotK, rag.RETRIEVAL_TOP_K_PER_STORY)
+		}
+		// The distribution is built from each story's BEST chunk (element 0),
+		// which is what the floor is compared against.
 		if !strings.Contains(csvOut.String(), "0.8000,1,a relevant story") {
 			t.Errorf("CSV missing the scored row:\n%s", csvOut.String())
 		}
 		if !strings.Contains(reportOut.String(), "Survival at candidate floors") {
 			t.Errorf("report not written to its own stream:\n%s", reportOut.String())
 		}
+		if !strings.Contains(reportOut.String(), "RECOMMENDATION") {
+			t.Errorf("report is missing the verdict section:\n%s", reportOut.String())
+		}
 		if len(dataset) != 2 {
 			t.Fatal("fixture changed unexpectedly")
 		}
 	})
 
+	t.Run("errors when a title scores against no chunk", func(t *testing.T) {
+		fakeDataset(t)
+		originalScorer := topScoresPerQuery
+		defer func() { topScoresPerQuery = originalScorer }()
+
+		topScoresPerQuery = func(queries []string, k int) ([][]float64, error) {
+			return [][]float64{{0.8}, {}}, nil
+		}
+
+		if err := calibrateFloor(io.Discard, io.Discard); err == nil {
+			t.Error("expected an error when a title has no score at all")
+		}
+	})
+
 	t.Run("errors when scoring fails", func(t *testing.T) {
 		fakeDataset(t)
-		originalScorer := bestSimilarityPerQuery
-		defer func() { bestSimilarityPerQuery = originalScorer }()
+		originalScorer := topScoresPerQuery
+		defer func() { topScoresPerQuery = originalScorer }()
 
-		bestSimilarityPerQuery = func(queries []string) ([]float64, error) {
+		topScoresPerQuery = func(queries []string, k int) ([][]float64, error) {
 			return nil, errors.New("corpus index unavailable")
 		}
 
@@ -200,11 +227,11 @@ func TestCalibrateFloor(t *testing.T) {
 
 	t.Run("errors when the scorer returns the wrong count", func(t *testing.T) {
 		fakeDataset(t)
-		originalScorer := bestSimilarityPerQuery
-		defer func() { bestSimilarityPerQuery = originalScorer }()
+		originalScorer := topScoresPerQuery
+		defer func() { topScoresPerQuery = originalScorer }()
 
-		bestSimilarityPerQuery = func(queries []string) ([]float64, error) {
-			return []float64{0.5}, nil // one score for two titles
+		topScoresPerQuery = func(queries []string, k int) ([][]float64, error) {
+			return [][]float64{{0.5}}, nil // one story scored, two titles sent
 		}
 
 		if err := calibrateFloor(io.Discard, io.Discard); err == nil {
@@ -213,13 +240,13 @@ func TestCalibrateFloor(t *testing.T) {
 	})
 
 	t.Run("errors when the dataset is missing", func(t *testing.T) {
-		originalLoad, originalScorer := loadDataset, bestSimilarityPerQuery
-		defer func() { loadDataset, bestSimilarityPerQuery = originalLoad, originalScorer }()
+		originalLoad, originalScorer := loadDataset, topScoresPerQuery
+		defer func() { loadDataset, topScoresPerQuery = originalLoad, originalScorer }()
 
 		loadDataset = func(path string) ([]LabelledStory, error) {
 			return nil, errors.New("no such file")
 		}
-		bestSimilarityPerQuery = func(queries []string) ([]float64, error) {
+		topScoresPerQuery = func(queries []string, k int) ([][]float64, error) {
 			t.Fatal("scoring should not run without a dataset")
 			return nil, nil
 		}

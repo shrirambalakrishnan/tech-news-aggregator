@@ -30,8 +30,8 @@ var (
 	// no real corpus support contributes nothing instead of contributing the
 	// least-irrelevant chunks. 0 keeps everything that is not anti-correlated,
 	// i.e. effectively no filtering: the correct value is a property of this
-	// corpus and must be MEASURED with `go run . calibrate` (step 3 of the
-	// plan on issue #19) before arm 3 is scored. Guessing it would make
+	// corpus and must be MEASURED with `go run . calibrate-floor` (step 3 of
+	// the plan on issue #19) before arm 3 is scored. Guessing it would make
 	// "the floor didn't help" unfalsifiable — voyage-4-lite's dynamic range is
 	// unknown, and against a distribution clustered in 0.7–0.9 a guessed 0.4
 	// filters nothing.
@@ -265,11 +265,38 @@ func RetrievePooledContext(queries []string) ([]string, error) {
 // what RETRIEVAL_SIMILARITY_FLOOR is compared against per story: a story whose
 // best score falls below the floor contributes no excerpts at all. Calibrating
 // the floor therefore means looking at the distribution of these numbers.
-//
-// It exists so the calibration step can measure the score distribution without
-// exporting cosineSimilarity or the index internals, and it costs one Voyage
-// request per batch of queries and no Claude call at all.
 func BestSimilarityPerQuery(queries []string) ([]float64, error) {
+	perQuery, err := TopScoresPerQuery(queries, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	best := make([]float64, 0, len(perQuery))
+	for _, scores := range perQuery {
+		// A query scores nothing only if the index is empty, which is already
+		// rejected above; -1 is the cosine floor, so it is the safe stand-in.
+		if len(scores) == 0 {
+			best = append(best, -1.0)
+			continue
+		}
+		best = append(best, scores[0])
+	}
+	return best, nil
+}
+
+// TopScoresPerQuery returns, for each query in order, the scores of that query's
+// k best-matching corpus chunks, highest first. It is the measurement behind the
+// calibration step: k=1 gives the per-story number the floor is compared
+// against, and k=RETRIEVAL_TOP_K_PER_STORY gives what each story would actually
+// contribute to the pool, which is what the pool-cap simulation needs.
+//
+// Scores only — the chunk texts are deliberately not returned, so the caller
+// cannot accidentally turn a measurement into a retrieval.
+//
+// It exists so calibration can measure without exporting cosineSimilarity or the
+// index internals, and it costs one Voyage request per batch of queries and no
+// Claude call at all.
+func TopScoresPerQuery(queries []string, k int) ([][]float64, error) {
 	index, err := loadCorpusIndex(CORPUS_INDEX_FILE)
 	if err != nil {
 		return nil, fmt.Errorf("corpus index unavailable: %w", err)
@@ -286,18 +313,21 @@ func BestSimilarityPerQuery(queries []string) ([]float64, error) {
 		return nil, fmt.Errorf("embedded %d queries, expected %d", len(queryVecs), len(queries))
 	}
 
-	best := make([]float64, 0, len(queryVecs))
+	perQuery := make([][]float64, 0, len(queryVecs))
 	for _, vec := range queryVecs {
-		// -1 is the cosine floor, so any real chunk beats it.
-		top := -1.0
+		scores := make([]float64, 0, len(index.Chunks))
 		for _, chunk := range index.Chunks {
-			if score := cosineSimilarity(vec, chunk.Embedding); score > top {
-				top = score
-			}
+			scores = append(scores, cosineSimilarity(vec, chunk.Embedding))
 		}
-		best = append(best, top)
+		sort.Sort(sort.Reverse(sort.Float64Slice(scores)))
+
+		top := min(k, len(scores))
+		if top < 0 {
+			top = 0
+		}
+		perQuery = append(perQuery, scores[:top])
 	}
-	return best, nil
+	return perQuery, nil
 }
 
 // RetrieveContext returns the texts of the k corpus chunks most similar to

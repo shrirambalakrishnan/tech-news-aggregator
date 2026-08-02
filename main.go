@@ -103,6 +103,12 @@ func runEmbed() error {
 // separate. The floor goes in that gap. If they don't separate, no floor works -
 // which is worth learning here rather than after an afternoon of eval runs.
 //
+// The report ends with a recommended value and the reason for it, so the numbers
+// don't have to be interpreted by hand. It also checks the floor against
+// rag.RETRIEVAL_POOL_CAP, which truncates the pooled chunks and so acts as a
+// floor of its own: a floor below what the cap already enforces is inert, and
+// that reads very differently from a floor that fired and didn't help.
+//
 // Re-run after every `embed`: the scores depend on the corpus, so the right
 // floor does too. Free - Voyage embeddings only, no Claude call.
 //

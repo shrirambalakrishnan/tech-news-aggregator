@@ -47,8 +47,8 @@ var CALIBRATION_FLOOR_STEPS = 10
 // DI seams (function-variable convention): tests swap these to calibrate
 // without touching the network or the git-ignored dataset.
 var (
-	bestSimilarityPerQuery = rag.BestSimilarityPerQuery
-	loadDataset            = loadLabelledData
+	topScoresPerQuery = rag.TopScoresPerQuery
+	loadDataset       = loadLabelledData
 )
 
 // scoredTitle pairs a labelled story with its best retrieval score — the number
@@ -70,11 +70,13 @@ type scoreSummary struct {
 // RunFloorCalibration is the `go run . calibrate-floor` entrypoint: score every
 // labelled title against the corpus index, print the per-title scores as CSV on
 // stdout (so it can be redirected to a file for plotting), and print the
-// distribution summary plus a floor-survival table on stderr.
+// evidence plus the decision on stderr.
 //
-// The floor is then read off the point where the label-1 and label-0
-// distributions separate — i.e. where "this story has real corpus support" stops
-// meaning "these are merely the least-irrelevant chunks".
+// The report has three sections. The distribution table and the survival table
+// are the evidence — where the label-1 and label-0 scores sit, and what each
+// candidate floor would keep. The verdict section (floor_verdict.go) reads that
+// evidence and states the value to set, so the conclusion does not depend on
+// whoever is looking at the tables.
 func RunFloorCalibration() error {
 	return calibrateFloor(os.Stdout, os.Stderr)
 }
@@ -93,24 +95,31 @@ func calibrateFloor(csvOut, reportOut io.Writer) error {
 		titles = append(titles, story.Title)
 	}
 
-	// One Voyage request per VOYAGE_MAX_BATCH titles; no Claude call.
-	scores, err := bestSimilarityPerQuery(titles)
+	// One Voyage request per VOYAGE_MAX_BATCH titles; no Claude call. Top-k
+	// rather than just the best score: element 0 is what the floor is compared
+	// against, and the full k is what the story would contribute to the pool,
+	// which is what the pool-cap simulation replays.
+	perStoryTop, err := topScoresPerQuery(titles, rag.RETRIEVAL_TOP_K_PER_STORY)
 	if err != nil {
 		return fmt.Errorf("calibrate-floor: %w", err)
 	}
-	if len(scores) != len(dataset) {
-		return fmt.Errorf("calibrate-floor: scored %d titles, expected %d", len(scores), len(dataset))
+	if len(perStoryTop) != len(dataset) {
+		return fmt.Errorf("calibrate-floor: scored %d titles, expected %d", len(perStoryTop), len(dataset))
 	}
 
 	scored := make([]scoredTitle, 0, len(dataset))
 	for i, story := range dataset {
-		scored = append(scored, scoredTitle{story: story, score: scores[i]})
+		if len(perStoryTop[i]) == 0 {
+			return fmt.Errorf("calibrate-floor: no chunk scored against %q", story.Title)
+		}
+		scored = append(scored, scoredTitle{story: story, score: perStoryTop[i][0]})
 	}
 
 	if err := writeScoreCSV(csvOut, scored); err != nil {
 		return fmt.Errorf("calibrate-floor: failed to write CSV: %w", err)
 	}
 	writeFloorReport(reportOut, scored)
+	writeVerdict(reportOut, buildFloorVerdict(scored, perStoryTop))
 	return nil
 }
 
@@ -172,8 +181,8 @@ func writeFloorReport(w io.Writer, scored []scoredTitle) {
 			keptNegative, percentOf(keptNegative, len(negatives)),
 		)
 	}
-	fmt.Fprintf(w, "\nSet rag.RETRIEVAL_SIMILARITY_FLOOR from the row where the two columns separate.\n")
-	fmt.Fprintf(w, "Note: this floor is fit on the labelled set, so the arm's score will be optimistic.\n\n")
+	fmt.Fprintf(w, "\nA usable floor shows up here as a row where the two columns pull apart.\n")
+	fmt.Fprintf(w, "This grid is coarse - the Verdict below sweeps every score and decides.\n\n")
 }
 
 func writeSummaryRow(w io.Writer, label string, s scoreSummary) {
