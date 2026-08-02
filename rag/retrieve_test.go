@@ -243,6 +243,65 @@ func TestRetrievePooledContext(t *testing.T) {
 	})
 }
 
+func TestBestSimilarityPerQuery(t *testing.T) {
+	index := CorpusIndex{Chunks: []Chunk{
+		{Text: "east", Embedding: []float32{1, 0}},
+		{Text: "north", Embedding: []float32{0, 1}},
+	}}
+
+	t.Run("returns each query's best chunk score, in order", func(t *testing.T) {
+		originalLoad, originalEmbed := loadCorpusIndex, embedQueries
+		defer func() { loadCorpusIndex, embedQueries = originalLoad, originalEmbed }()
+
+		loadCorpusIndex = func(path string) (CorpusIndex, error) { return index, nil }
+		embedQueries = func(queries []string) ([][]float32, error) {
+			return [][]float32{
+				{1, 0},     // exactly "east" -> 1
+				{0.6, 0.8}, // 0.6 to east, 0.8 to north -> best 0.8
+			}, nil
+		}
+
+		got, err := BestSimilarityPerQuery([]string{"a", "b"})
+		if err != nil {
+			t.Fatalf("BestSimilarityPerQuery returned error: %v", err)
+		}
+		// Tolerance is float32-sized: the embeddings round-trip through float32,
+		// so 0.8 comes back as 0.79999999.
+		if len(got) != 2 || math.Abs(got[0]-1) > 1e-6 || math.Abs(got[1]-0.8) > 1e-6 {
+			t.Errorf("scores = %v, want [1 0.8]", got)
+		}
+	})
+
+	t.Run("errors on an empty index rather than reporting -1 scores", func(t *testing.T) {
+		originalLoad, originalEmbed := loadCorpusIndex, embedQueries
+		defer func() { loadCorpusIndex, embedQueries = originalLoad, originalEmbed }()
+
+		loadCorpusIndex = func(path string) (CorpusIndex, error) { return CorpusIndex{}, nil }
+		embedQueries = func(queries []string) ([][]float32, error) {
+			t.Fatal("embedQueries should not be called for an empty index")
+			return nil, nil
+		}
+
+		if _, err := BestSimilarityPerQuery([]string{"a"}); err == nil {
+			t.Error("expected an error when the index holds no chunks")
+		}
+	})
+
+	t.Run("errors when embedding fails", func(t *testing.T) {
+		originalLoad, originalEmbed := loadCorpusIndex, embedQueries
+		defer func() { loadCorpusIndex, embedQueries = originalLoad, originalEmbed }()
+
+		loadCorpusIndex = func(path string) (CorpusIndex, error) { return index, nil }
+		embedQueries = func(queries []string) ([][]float32, error) {
+			return nil, errors.New("rate limited")
+		}
+
+		if _, err := BestSimilarityPerQuery([]string{"a"}); err == nil {
+			t.Error("expected an error when embedding fails")
+		}
+	})
+}
+
 func TestRetrieveContext(t *testing.T) {
 	t.Run("returns top-k chunk texts, best match first", func(t *testing.T) {
 		originalLoad, originalEmbed := loadCorpusIndex, embedQuery

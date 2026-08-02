@@ -46,6 +46,7 @@ func main() {
 //	go run . eval <arm> -> eval     (arm REQUIRED)
 //	go run . prebuild   -> prebuild
 //	go run . embed      -> build the arm 2 (RAG) corpus index
+//	go run . calibrate-floor -> pick rag.RETRIEVAL_SIMILARITY_FLOOR from measured scores
 func run(args []string) error {
 	godotenv.Load()
 
@@ -59,6 +60,8 @@ func run(args []string) error {
 		return runPrebuild()
 	case "embed":
 		return runEmbed()
+	case "calibrate-floor":
+		return runCalibrateFloor()
 	case "eval":
 		return runEval(args[1:])
 	default:
@@ -81,6 +84,31 @@ func runPrebuild() error {
 func runEmbed() error {
 	rag.BuildCorpusIndex()
 	return nil
+}
+
+// runCalibrateFloor picks the value of rag.RETRIEVAL_SIMILARITY_FLOOR.
+//
+// That floor is a cosine-similarity threshold (a score in [-1, 1], NOT a count
+// of chunks): arm 3 ignores corpus chunks scoring below it, so a story with no
+// real corpus support contributes no excerpts at all.
+//
+// Choosing it by trial and error is impractical because cosine scores cluster in
+// a narrow band that differs per embedding model. Every floor below that band
+// filters nothing and every floor above it filters everything, so most values
+// you could try produce the identical result - while each try costs a full eval
+// run (~$0.02, ~10 min, and noisy enough at 35 positives to need repeats).
+//
+// So instead: score every labelled title against the corpus, split the scores by
+// the human label, and look at where the relevant and irrelevant stories
+// separate. The floor goes in that gap. If they don't separate, no floor works -
+// which is worth learning here rather than after an afternoon of eval runs.
+//
+// Re-run after every `embed`: the scores depend on the corpus, so the right
+// floor does too. Free - Voyage embeddings only, no Claude call.
+//
+//	go run . calibrate-floor > scores.csv   # CSV on stdout, report on stderr
+func runCalibrateFloor() error {
+	return evalHarness.RunFloorCalibration()
 }
 
 // runEval runs the classifier over the hand-labelled dataset and prints

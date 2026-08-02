@@ -260,6 +260,46 @@ func RetrievePooledContext(queries []string) ([]string, error) {
 	return texts, nil
 }
 
+// BestSimilarityPerQuery returns, for each query in order, the highest cosine
+// similarity any corpus chunk scores against it. That single number is exactly
+// what RETRIEVAL_SIMILARITY_FLOOR is compared against per story: a story whose
+// best score falls below the floor contributes no excerpts at all. Calibrating
+// the floor therefore means looking at the distribution of these numbers.
+//
+// It exists so the calibration step can measure the score distribution without
+// exporting cosineSimilarity or the index internals, and it costs one Voyage
+// request per batch of queries and no Claude call at all.
+func BestSimilarityPerQuery(queries []string) ([]float64, error) {
+	index, err := loadCorpusIndex(CORPUS_INDEX_FILE)
+	if err != nil {
+		return nil, fmt.Errorf("corpus index unavailable: %w", err)
+	}
+	if len(index.Chunks) == 0 {
+		return nil, fmt.Errorf("corpus index holds no chunks: run `go run . embed` first")
+	}
+
+	queryVecs, err := embedQueries(queries)
+	if err != nil {
+		return nil, fmt.Errorf("failed to embed calibration queries: %w", err)
+	}
+	if len(queryVecs) != len(queries) {
+		return nil, fmt.Errorf("embedded %d queries, expected %d", len(queryVecs), len(queries))
+	}
+
+	best := make([]float64, 0, len(queryVecs))
+	for _, vec := range queryVecs {
+		// -1 is the cosine floor, so any real chunk beats it.
+		top := -1.0
+		for _, chunk := range index.Chunks {
+			if score := cosineSimilarity(vec, chunk.Embedding); score > top {
+				top = score
+			}
+		}
+		best = append(best, top)
+	}
+	return best, nil
+}
+
 // RetrieveContext returns the texts of the k corpus chunks most similar to
 // query, best match first. An error usually means the index is missing (the
 // embed step hasn't run). Callers must NOT fail soft on it: under explicit arm
