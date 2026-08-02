@@ -43,9 +43,11 @@ production default, kept for cron-safety), `arm 1` = interests injected from the
 distilled JSON, `arm 2` = RAG with one query blended from the batch's titles,
 `arm 3` = RAG with one query **per story**, pooled (both retrieve from the embed
 step's index and are live in **both** the classify path and `evalHarness`).
-Arms 2 and 3 share the same corpus, index and prompt and differ in excerpt
-**selection** only — deliberately, so an eval delta is attributable to retrieval
-rather than to prompt wording. Every arm's context
+Arms 2 and 3 share the same corpus, index and prompt template, so an eval delta
+between them cannot come from prompt **wording**. They were *intended* to differ
+in excerpt **selection** only, but they also differ in excerpt **count** (arm 2
+injects `rag.RETRIEVAL_TOP_K` = 5, arm 3 up to `rag.RETRIEVAL_POOL_CAP` = 20) —
+a live confound, see Approach 4 below. Every arm's context
 is built by **one shared function**, `armcontext.BuildProfile(arm, stories)`,
 which returns the arm's `UserProfile` and **errors (non-zero exit) when the arm's
 data is missing** — it does *not* fail soft to arm 0. The `stories` parameter is
@@ -159,11 +161,13 @@ Offline eval of the classifier against a hand-labelled dataset, to measure class
 
 ## Approach 4 — per-story RAG retrieval (built + evaluated; did not beat Approach 3)
 
-**Status: built, scored, and the hypothesis was rejected.** Arm 3 retrieves per story and pools instead of blending the batch into one query. It is a strict single-variable change from arm 2 — same corpus, same index, same `ragClassificationPrompt`, same one-Claude-call-per-batch shape — so any delta is attributable to retrieval alone. `ConstructPromptSystemAttribute` shares one branch (`case ArmRAG, ArmRAGPerStory:`) and a test asserts the two prompts are byte-identical, so they cannot drift.
+**Status: built, scored, and the hypothesis was rejected — but the comparison is confounded.** Arm 3 retrieves per story and pools instead of blending the batch into one query, against the same corpus, index, `ragClassificationPrompt` and one-Claude-call-per-batch shape. `ConstructPromptSystemAttribute` shares one branch (`case ArmRAG, ArmRAGPerStory:`) and a test asserts the two prompts are byte-identical *given the same excerpts*, so prompt **wording** cannot explain any delta.
+
+> ⚠️ **It is NOT the single-variable change it was designed to be.** Arm 2 injects `rag.RETRIEVAL_TOP_K` = 5 excerpts; arm 3 injects up to `rag.RETRIEVAL_POOL_CAP` = 20, and the scored run's cost (~24K input tokens/call) shows the cap was binding. Excerpt **volume** changed alongside excerpt **selection**, so arm 3's ~4× larger prompt — 20 × ~800-word chunks inlined verbatim — is an alternative explanation for its lower recall (dilution / position effects in long stuffed contexts), and the recorded delta cannot separate the two. The byte-identical-prompt test does not catch this: it passes one fixed `UserProfile` to both arms, so it constrains the template, not the content. `rag.TestRetrievalArmsInjectDifferentExcerptVolumes` pins the volume gap at the shipped constants and fails if they are ever equalized without re-running. **De-confound by setting `RETRIEVAL_POOL_CAP` = `RETRIEVAL_TOP_K` and re-running `eval 2` and `eval 3` together** (~$0.08 each — arm 3's cost is dominated by excerpt count). **Design lesson: "same prompt template" is not "same prompt"; a single-variable claim has to account for context volume, not just context wording.**
 
 **Result: 10 TP / 63 FP / 25 FN → precision 0.1370, recall 0.2857.** Both acceptance targets from issue #19 (FP ≤ 35, recall ≥ 0.40) missed. Arm 3 flagged 73 stories vs arm 2's 84; of the 11 it stopped flagging, 4 were relevant — a 36% hit rate among the dropped, against 17% across arm 2's flagged set, i.e. it pruned the *better* part of the set. **But the gap is inside the noise:** at 35 positives the standard error on recall is ~8pp and the difference is ~11pp (~1.4 SE). The defensible claim is "arm 3 is not better", not "arm 3 is worse".
 
-**Why, diagnosed before the eval rather than after.** `calibrate-floor` measured **AUC 0.659, d′ 0.635** over the labelled set: relevant and irrelevant stories' best-chunk scores overlap heavily (class overlap, *not* the embedding cone effect — the range 0.09–0.51 is wide, not compressed). Arms 2 and 3 select from that same weak ranking and differ only in *how*; no selection strategy rescues a ranking that barely separates the classes. **Transferable lesson: measure retrieval ranking quality (free, no Claude call) before building selection strategies on top of it.**
+**Why, diagnosed before the eval rather than after.** `calibrate-floor` measured **AUC 0.659, d′ 0.635** over the labelled set: relevant and irrelevant stories' best-chunk scores overlap heavily (class overlap, *not* the embedding cone effect — the range 0.09–0.51 is wide, not compressed). Both arms select from that same weak ranking; no selection strategy rescues a ranking that barely separates the classes. This is the one conclusion the excerpt-volume confound above does **not** touch — it is measured at the retrieval layer, before any prompt is built. **Transferable lesson: measure retrieval ranking quality (free, no Claude call) before building selection strategies on top of it.**
 
 **Floor calibration (`go run . calibrate-floor`, `evalHarness/calibrate_floor.go` + `floor_verdict.go`).** Scores every labelled title against the index and prints distribution + survival tables, then a **verdict** section: AUC/d′ against named reading points, the best floor from a fine sweep over every observed score, the interaction with `RETRIEVAL_POOL_CAP`, and a recommended value with its reason. One Voyage request per 128 titles, no Claude call, $0.00. The verdict section was added *after* the first run, when the tables alone proved insufficient to act on — the numbers had to be re-analysed by hand, leaving the conclusion unreproducible, which defeats the point of measuring instead of guessing.
 

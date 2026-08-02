@@ -224,11 +224,18 @@ func (s scoredChunks) chunks() []Chunk {
 // into a single deduplicated list of at most RETRIEVAL_POOL_CAP chunk texts,
 // best match first.
 //
-// It differs from RetrieveContext (arm 2) in exactly one variable — how
-// excerpts are selected — so that a delta in the eval is attributable to
-// per-story retrieval and nothing else. All the queries travel as one Voyage
-// request (voyageapi.EmbedQueries batches them), so this costs the same single
-// round trip arm 2 pays.
+// It changes TWO things against RetrieveContext (arm 2), not one. Selection is
+// the intended variable — per-story queries pooled, instead of one blended
+// query. Excerpt VOLUME is the unintended one: arm 2 injects RETRIEVAL_TOP_K
+// (5) chunks, this returns up to RETRIEVAL_POOL_CAP (20), and in the scored run
+// the cap was binding. A delta between the arms is therefore confounded between
+// "per-story retrieval didn't help" and "a ~4x larger prompt diluted the
+// signal". Setting RETRIEVAL_POOL_CAP = RETRIEVAL_TOP_K and re-running both arms
+// is what makes the comparison genuinely single-variable; until that is done,
+// see README -> "Eval - Execution results" for how the recorded numbers are
+// qualified. All the queries travel as one Voyage request
+// (voyageapi.EmbedQueries batches them), so this costs the same single round
+// trip arm 2 pays.
 //
 // Errors propagate; callers must NOT fail soft, for the same reason as
 // RetrieveContext.

@@ -92,7 +92,7 @@ When the script tries to filter the interested news items
 | `0` | none | generic/static "technical CS" prompt | never — production default |
 | `1` | `summary` + `interests` from `profile/user_context.json` | interests injected into the prompt | the distilled JSON is missing (run `prebuild` first) |
 | `2` | top-k corpus excerpts retrieved for the batch being classified | excerpts inlined into the prompt as evidence of the reader's interests | `profile/corpus_index.json` is missing, or retrieval fails (run `embed` first) |
-| `3` | corpus excerpts retrieved **per story** and pooled, capped at `RETRIEVAL_POOL_CAP` | identical to arm 2 — same prompt, same corpus, same index; only excerpt *selection* differs | same as arm 2 |
+| `3` | corpus excerpts retrieved **per story** and pooled, capped at `RETRIEVAL_POOL_CAP` | same prompt *template*, corpus and index as arm 2; excerpt *selection* differs — and so does excerpt **count** (up to 20 vs arm 2's 5), see the confound note below | same as arm 2 |
 
 ```bash
 # Approach 1
@@ -154,6 +154,25 @@ on recall is about 8 percentage points; the arm 2 → arm 3 difference is 11 poi
 roughly 1.4 standard errors. The defensible claim is **"arm 3 is not better"**, not
 "arm 3 is worse". Separating those would need several runs per arm.
 
+**And the comparison is confounded: two variables changed, not one.** Arm 3 was
+intended as a single-variable change (excerpt *selection*), and the prompt
+template is genuinely shared — a test asserts the two arms render byte-identical
+prompts from the same excerpts, so prompt *wording* is ruled out. Prompt *size* is
+not: arm 2 injects `RETRIEVAL_TOP_K` = 5 excerpts, arm 3 up to
+`RETRIEVAL_POOL_CAP` = 20, and the cost of the scored run (~290K input tokens over
+12 calls ≈ 24K per call) shows the cap was binding. Every excerpt is ~800 words
+inlined verbatim, so arm 3's prompt was roughly 4× arm 2's — and dilution and
+position effects in long stuffed contexts are a well-documented cause of exactly
+the kind of recall drop observed. **So the recorded delta cannot distinguish
+"per-story retrieval didn't help" from "the bigger prompt hurt".** The conclusion
+that survives regardless is the one from the retrieval statistics below (AUC
+0.659): the ranking both arms select from barely separates the classes.
+`rag.TestRetrievalArmsInjectDifferentExcerptVolumes` pins this gap so it stays
+visible in code. **De-confounding is cheap** — set `RETRIEVAL_POOL_CAP` =
+`RETRIEVAL_TOP_K` = 5 and re-run `eval 2` and `eval 3` together (~$0.08 each at 5
+chunks, since arm 3's cost is dominated by the excerpt count). Cap-matched, the
+comparison is genuinely single-variable.
+
 **Why it did not work — measured before the eval, not after.** `calibrate-floor`
 scored every labelled title against the corpus and found **AUC 0.659, d′ 0.635**:
 relevant and irrelevant stories' best-chunk scores overlap heavily. Arms 2 and 3
@@ -172,11 +191,14 @@ effect.
 for itself over the static ruleset. Arm 1 remains the precision leader (0.3333
 against a 10% base rate) at the worst recall by far, so the choice between arms 1
 and 2 is still a precision/recall preference, not a quality ranking. Arm 3 adds
-nothing over arm 2 and costs ~3.5× as much per eval run (~$0.29 vs ~$0.08, since
-20 pooled chunks go into every prompt instead of 5).
+nothing over arm 2 **as configured** and costs ~3.5× as much per eval run (~$0.29
+vs ~$0.08, since 20 pooled chunks go into every prompt instead of 5) — which is
+also the confound described above.
 
-Next levers, in cost order: smaller chunks (currently 800 words — a ~9-word title
-averaged against an 800-word window dilutes the signal, and re-testing at the
+Next levers, in cost order: the cap-matched arm 2 vs arm 3 re-run above (~$0.16
+total, and the only way to attribute the recorded delta), smaller chunks
+(currently 800 words — a ~9-word title averaged against an 800-word window
+dilutes the signal, and re-testing at the
 retrieval layer via `calibrate-floor` is free), wider corpus coverage, then
 reranking — evaluated first as a scoring function (AUC on a subsample) before any
 arm is wired.

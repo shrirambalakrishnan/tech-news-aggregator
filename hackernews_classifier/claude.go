@@ -27,10 +27,12 @@ const (
 	ArmRAG Arm = 2
 	// ArmRAGPerStory classifies against the SAME kind of corpus excerpts as
 	// ArmRAG, retrieved differently: one query per story, pooled, instead of one
-	// blended query for the whole batch. It differs from ArmRAG in exactly one
-	// variable - how excerpts are selected - so a delta in the eval is
-	// attributable to retrieval and not to a changed prompt. The prompt is
-	// therefore deliberately shared with ArmRAG rather than written afresh.
+	// blended query for the whole batch. The prompt is deliberately shared with
+	// ArmRAG rather than written afresh, so no eval delta can come from prompt
+	// WORDING. It can still come from prompt SIZE: the caller fills this arm's
+	// excerpts up to rag.RETRIEVAL_POOL_CAP (20) against ArmRAG's
+	// rag.RETRIEVAL_TOP_K (5). That confound is upstream in armcontext/rag, not
+	// here, and is documented on rag.RetrievePooledContext.
 	ArmRAGPerStory Arm = 3
 )
 
@@ -83,10 +85,13 @@ var claudeMessageApiCall = claudeapi.ClaudeMessageApiCall
 // profile's emptiness nor the presence of corpus chunks selects it - so each
 // prompt is built from exactly one context source and the arms stay comparable.
 //
-// ArmRAG and ArmRAGPerStory share a branch on purpose. They differ only in how
-// the excerpts were selected, which happens upstream in armcontext; giving arm 3
-// its own prompt would make any eval delta unattributable between "per-story
-// retrieval helped" and "we happened to write a better prompt".
+// ArmRAG and ArmRAGPerStory share a branch on purpose: how the excerpts were
+// chosen happens upstream in armcontext, and giving arm 3 its own prompt would
+// make any eval delta unattributable between "per-story retrieval helped" and
+// "we happened to write a better prompt". Sharing the branch rules out prompt
+// wording as an explanation - it does NOT rule out prompt size, which differs
+// between the arms because they inject different numbers of excerpts (see
+// rag.RetrievePooledContext).
 func ConstructPromptSystemAttribute(arm Arm, profile UserProfile) string {
 	switch arm {
 	case ArmInterests:

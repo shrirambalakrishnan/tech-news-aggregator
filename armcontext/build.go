@@ -34,8 +34,11 @@ var loadPooledRagContext = rag.RetrievePooledContext
 //   - ArmRAG         -> top-k corpus excerpts for one query blended from these
 //     stories' titles.
 //   - ArmRAGPerStory -> the same kind of excerpts, retrieved per story and
-//     pooled. Same corpus, same index, same prompt downstream: the arms differ
-//     in excerpt SELECTION only, which is what makes an eval delta attributable.
+//     pooled. Same corpus, same index, same prompt template downstream. Note the
+//     arms differ in excerpt VOLUME as well as selection - arm 2 injects
+//     rag.RETRIEVAL_TOP_K (5) excerpts, arm 3 up to rag.RETRIEVAL_POOL_CAP (20) -
+//     so an eval delta between them is NOT attributable to selection alone. See
+//     rag.RetrievePooledContext for the confound and how to remove it.
 //
 // The stories are the retrieval query for both retrieval arms, which is why they
 // are a parameter rather than something the caller splices in afterwards: every

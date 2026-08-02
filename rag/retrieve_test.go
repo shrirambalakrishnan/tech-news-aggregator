@@ -2,6 +2,7 @@ package rag
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -134,6 +135,83 @@ func TestPoolChunks(t *testing.T) {
 			t.Errorf("expected an empty pool, got %v", texts(got))
 		}
 	})
+}
+
+// The two retrieval arms are documented as differing in excerpt SELECTION. They
+// also differ in excerpt VOLUME, which is a second variable: the excerpts are
+// inlined verbatim into the prompt, so arm 3's larger budget makes its prompt
+// several times bigger, and prompt size is itself a plausible cause of any eval
+// delta (dilution, position effects). This test runs both arms' real entry
+// points at their SHIPPED constants and pins that gap, so the confound cannot
+// quietly stop matching what README and CLAUDE.md say about it.
+//
+// If this test fails because the constants were equalized: good - the confound
+// is gone, but the recorded arm 2 vs arm 3 numbers were measured under the old
+// ones. Re-run both arms and drop the confound caveats from README/CLAUDE.md
+// before deleting this test.
+func TestRetrievalArmsInjectDifferentExcerptVolumes(t *testing.T) {
+	// One chunk per dimension, so a one-hot query scores exactly one chunk at
+	// 1.0 and every other at 0.0 - enough distinct chunks that pooling 30
+	// stories x RETRIEVAL_TOP_K_PER_STORY overflows RETRIEVAL_POOL_CAP, which is
+	// the condition the scored eval run was in.
+	const chunkCount = 64
+	chunks := make([]Chunk, 0, chunkCount)
+	for i := 0; i < chunkCount; i++ {
+		embedding := make([]float32, chunkCount)
+		embedding[i] = 1
+		chunks = append(chunks, Chunk{
+			Source:     "corpus.md",
+			ChunkIndex: i,
+			Text:       fmt.Sprintf("chunk %d", i),
+			Embedding:  embedding,
+		})
+	}
+	index := CorpusIndex{Chunks: chunks}
+
+	oneHot := func(i int) []float32 {
+		vec := make([]float32, chunkCount)
+		vec[i] = 1
+		return vec
+	}
+
+	originalLoad, originalQuery, originalQueries := loadCorpusIndex, embedQuery, embedQueries
+	defer func() { loadCorpusIndex, embedQuery, embedQueries = originalLoad, originalQuery, originalQueries }()
+	loadCorpusIndex = func(path string) (CorpusIndex, error) { return index, nil }
+
+	// A production-sized batch: HACKERNEWS_HITS_PER_PAGE / EVAL_BATCH_SIZE is 30.
+	const batchSize = 30
+	queries := make([]string, 0, batchSize)
+	for i := 0; i < batchSize; i++ {
+		queries = append(queries, fmt.Sprintf("story %d", i))
+	}
+
+	embedQuery = func(query string) ([]float32, error) { return oneHot(0), nil }
+	blended, err := RetrieveContext("blended query", RETRIEVAL_TOP_K)
+	if err != nil {
+		t.Fatalf("RetrieveContext returned error: %v", err)
+	}
+
+	embedQueries = func(qs []string) ([][]float32, error) {
+		vecs := make([][]float32, 0, len(qs))
+		for i := range qs {
+			vecs = append(vecs, oneHot(i))
+		}
+		return vecs, nil
+	}
+	pooled, err := RetrievePooledContext(queries)
+	if err != nil {
+		t.Fatalf("RetrievePooledContext returned error: %v", err)
+	}
+
+	if len(blended) != RETRIEVAL_TOP_K {
+		t.Errorf("arm 2 supplied %d excerpts, want RETRIEVAL_TOP_K = %d", len(blended), RETRIEVAL_TOP_K)
+	}
+	if len(pooled) != RETRIEVAL_POOL_CAP {
+		t.Errorf("arm 3 supplied %d excerpts, want the cap to bind at RETRIEVAL_POOL_CAP = %d", len(pooled), RETRIEVAL_POOL_CAP)
+	}
+	if len(blended) == len(pooled) {
+		t.Fatalf("the arms now inject the same excerpt count (%d); see this test's doc comment before deleting it", len(blended))
+	}
 }
 
 func TestRetrievePooledContext(t *testing.T) {

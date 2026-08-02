@@ -111,9 +111,12 @@ func TestConstructPromptSystemAttribute(t *testing.T) {
 		}
 	})
 
-	// Arm 3's whole design rests on this: it differs from arm 2 in how excerpts
-	// were SELECTED, never in what is done with them. If the prompts ever
-	// diverge, an eval delta stops being attributable to retrieval.
+	// Given the same excerpts, both retrieval arms must render the same prompt:
+	// if the wording ever diverges, an eval delta stops being attributable to
+	// retrieval. Note what this does NOT prove - it passes one fixed profile to
+	// both arms, so it says nothing about how many excerpts each arm actually
+	// supplies. That volume differs (5 vs up to 20) and is pinned separately by
+	// rag.TestRetrievalArmsInjectDifferentExcerptVolumes.
 	t.Run("builds the identical prompt for ArmRAGPerStory", func(t *testing.T) {
 		profile := UserProfile{
 			RetrievedExcerpts: []string{"TrueTime bounds clock uncertainty", "Raft elects a single leader"},
