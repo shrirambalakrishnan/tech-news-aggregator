@@ -28,14 +28,26 @@ var (
 
 	// RETRIEVAL_SIMILARITY_FLOOR drops chunks scoring below it, so a story with
 	// no real corpus support contributes nothing instead of contributing the
-	// least-irrelevant chunks. 0 keeps everything that is not anti-correlated,
-	// i.e. effectively no filtering: the correct value is a property of this
-	// corpus and must be MEASURED with `go run . calibrate-floor` (step 3 of
-	// the plan on issue #19) before arm 3 is scored. Guessing it would make
-	// "the floor didn't help" unfalsifiable — voyage-4-lite's dynamic range is
-	// unknown, and against a distribution clustered in 0.7–0.9 a guessed 0.4
-	// filters nothing.
-	RETRIEVAL_SIMILARITY_FLOOR = 0.0
+	// least-irrelevant chunks. Cosine similarity, so the meaningful range here
+	// is 0.0 (no filtering) to ~0.5 (the highest score any labelled title
+	// reaches). It is a property of THIS corpus, so it is MEASURED, never
+	// guessed: `go run . calibrate-floor` recommends it, and the value must be
+	// re-derived after any change to the corpus, the chunk size, or
+	// RETRIEVAL_POOL_CAP.
+	//
+	// Read by arm 3 only (RetrievePooledContext). Arm 2's RetrieveContext uses
+	// topKBySimilarity, which takes no floor, so changing this cannot move arm
+	// 2's numbers.
+	//
+	// Set to the post-notes calibration's recommendation (2026-08-03): keeps
+	// 65.7% of relevant stories while dropping 68.0% of irrelevant ones.
+	// Unlike the pre-notes calibration — where the best floor (0.2336) sat
+	// below the ~0.32 that RETRIEVAL_POOL_CAP already enforced by truncation,
+	// leaving the floor inert — this value sits ABOVE the cap's implied median
+	// (0.3213) and would actually bind. UNTESTED: no arm 3 eval has been run
+	// with it. Fit on the labelled set, so arm 3's score under it will be
+	// optimistic by an unknown amount.
+	RETRIEVAL_SIMILARITY_FLOOR = 0.3330
 
 	// RETRIEVAL_POOL_CAP is the hard ceiling on pooled chunks per call. It is
 	// what keeps arm 3 retrieval rather than long-context stuffing: it bounds
