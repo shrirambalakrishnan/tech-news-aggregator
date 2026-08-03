@@ -194,6 +194,8 @@ Offline eval of the classifier against a hand-labelled dataset, to measure class
 - Don't buy it with false alarms: precision ≥ 0.1667 **and** FP < 70 (arm 2's current numbers).
 - Win condition: **recall > 0.50 at precision ≥ 0.1667.** With 35 positives a single run wobbles ~±0.04 recall, so a delta under ~0.10 is not distinguishable from luck.
 
+> ⚠️ **The baseline these thresholds cite is the best of three samples, and the thresholds were left anchored to it anyway (deliberate call, 2026-08-03).** Two repeat `eval 2` runs on the same pre-notes index scored recall 0.2571 and 0.3714 against the tabled 0.4000 — mean **0.343 ± 0.076**, precision mean **0.148 ± 0.022**, TP **12 ± 2.6**, FP **68.7 ± 4.2**. The spread matches the ~8pp binomial SE at 35 positives, and since retrieval is deterministic given a fixed index it is entirely Claude's sampling: `claudeapi.Request` sends **no `temperature` field**, so calls run at the API default of 1.0. Pinning it to 0 is the one-line lever if noise ever blocks a decision — not taken, because it re-bases every recorded number at once. **Consequence for reading the notes result:** a post-notes run near 0.34 recall / 12 TP fails the "hold ground" row while actually sitting on the baseline *mean* — that is a null result, not a regression. Below ~0.27 is evidence of harm; only the win condition clears the noise upward. Full table in README → *Run-to-run variance*.
+
 **Run order (the index is a single unversioned file, so `embed` destroys the pre-notes state — snapshot first).**
 1. `cp profile/corpus_index.json profile/corpus_index.pre-notes.json`
 2. `go run . calibrate-floor > profile/scores-pre-notes.csv` — baseline ranking **and** baseline top-source table ($0.00)

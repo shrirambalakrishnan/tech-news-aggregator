@@ -128,6 +128,17 @@ never read by retrieval.
 | Don't buy it with false alarms | precision ≥ 0.1667 **and** FP < 70 | arm 2's current numbers |
 | Win condition | recall > 0.50 at precision ≥ 0.1667 | a single run wobbles ~±0.04 recall at 35 positives |
 
+⚠️ **These thresholds are anchored to arm 2's tabled run, which repeat runs have
+since shown to be the *highest* of three samples** (recall 0.4000 against a mean
+of 0.343 ± 0.076 — see *Run-to-run variance* above). Kept unchanged deliberately,
+but read the result accordingly: a post-notes run landing near **0.34 recall / 12
+TP** is sitting on the baseline mean and is a *null* result, not a regression,
+even though it fails the "hold ground" row. Only a post-notes run below ~0.27
+(the baseline's own worst sample) is evidence of actual harm, and only the win
+condition — a >0.10 recall shift — clears the noise in the other direction. The
+n=1 wobble noted in the last row is the *within-run* estimate; the measured
+between-run spread is roughly double it.
+
 #### Run order
 
 `profile/corpus_index.json` is a single unversioned file, so `embed` destroys the
@@ -215,6 +226,35 @@ above is offset by one and would collide here.
 | Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 |
 | Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 |
 
+#### Run-to-run variance — measured for arm 2 (n = 3)
+
+⚠️ **The arm 2 column above is one sample, and it is the highest of three.** Two
+further `eval 2` runs against the *same* pre-notes index (2026-08-03) came back:
+
+| Run | TP | FP | TN | FN | Precision | Recall |
+|--|--|--|--|--|--|--|
+| tabled above | 14 | 70 | 236 | 21 | 0.1667 | 0.4000 |
+| repeat 1 | 9 | 64 | 242 | 26 | 0.1233 | 0.2571 |
+| repeat 2 | 13 | 72 | 234 | 22 | 0.1529 | 0.3714 |
+| **mean ± sd** | **12 ± 2.6** | **68.7 ± 4.2** | | | **0.148 ± 0.022** | **0.343 ± 0.076** |
+
+The ±7.6pp spread on recall matches the ~8pp binomial standard error at 35
+positives, so this is ordinary sampling noise, not a defect — and it is the
+concrete version of the "one run is a point estimate" caveat this section opens
+with. Retrieval is deterministic given a fixed index (same titles, same batches,
+same embeddings), so the variance is entirely **Claude's sampling**:
+`claudeapi.Request` sends no `temperature` field, so every call runs at the API
+default of 1.0. Pinning it to 0 is the obvious lever if the noise ever blocks a
+decision; it is deliberately **not** done here, because it would re-base every
+number in this section at once.
+
+**How to read every single-run number in this table, therefore:** as a draw from
+a distribution roughly this wide, not as the arm's value. Two consequences worth
+stating: the arm 2 → arm 3 gap discussed below is even less separable than the
+1.4-standard-error estimate given there, and the "identical recall" claim under
+*Standing conclusions* compares two n=1 draws — arm 2's mean is 0.343, not
+0.4000, and arm 0 has never been repeated at all.
+
 #### Reading the results
 
 **Arm 3 did not beat arm 2.** It missed both acceptance targets set in issue #19
@@ -269,9 +309,13 @@ already enforces by truncation, so no floor both fires and helps. Arm 3's number
 therefore measure per-story retrieval plus pooling, with floor-filtering never in
 effect.
 
-**Standing conclusions.** Arm 2 dominates arm 0 — identical recall (0.4000) at
-**60% fewer false positives** (70 vs 120) — so blended-query retrieval does pay
-for itself over the static ruleset. Arm 1 remains the precision leader (0.3333
+**Standing conclusions.** Arm 2 dominates arm 0 on false positives — **60% fewer**
+(70 vs 120) — so blended-query retrieval does pay for itself over the static
+ruleset. The recall half of that claim no longer stands as written: it read
+"identical recall (0.4000)", which compared two single draws, and arm 2's
+three-run mean is **0.343** while arm 0 has never been repeated (see *Run-to-run
+variance* above). Treat it as "arm 2 buys a large FP reduction at a recall cost
+that is not resolved". Arm 1 remains the precision leader (0.3333
 against a 10% base rate) at the worst recall by far, so the choice between arms 1
 and 2 is still a precision/recall preference, not a quality ranking. Arm 3 adds
 nothing over arm 2 **as configured**, and its estimated eval cost is ~3.5× arm 2's
