@@ -401,6 +401,110 @@ func TestBestSimilarityPerQuery(t *testing.T) {
 	})
 }
 
+func TestTopSourcesPerQuery(t *testing.T) {
+	index := CorpusIndex{Chunks: []Chunk{
+		{Source: "readme-tech-news-aggregator.md", Text: "east", Embedding: []float32{1, 0}},
+		{Source: "notes-agentic-rag.md", Text: "north", Embedding: []float32{0, 1}},
+	}}
+
+	t.Run("names each query's winning source file, in order", func(t *testing.T) {
+		originalLoad, originalEmbed := loadCorpusIndex, embedQueries
+		defer func() { loadCorpusIndex, embedQueries = originalLoad, originalEmbed }()
+
+		loadCorpusIndex = func(path string) (CorpusIndex, error) { return index, nil }
+		embedQueries = func(queries []string) ([][]float32, error) {
+			return [][]float32{
+				{1, 0},     // closest to the README chunk
+				{0.6, 0.8}, // closest to the notes chunk
+			}, nil
+		}
+
+		got, err := TopSourcesPerQuery([]string{"a", "b"})
+		if err != nil {
+			t.Fatalf("TopSourcesPerQuery returned error: %v", err)
+		}
+		want := []string{"readme-tech-news-aggregator.md", "notes-agentic-rag.md"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("sources = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("errors on an empty index rather than naming no source", func(t *testing.T) {
+		originalLoad, originalEmbed := loadCorpusIndex, embedQueries
+		defer func() { loadCorpusIndex, embedQueries = originalLoad, originalEmbed }()
+
+		loadCorpusIndex = func(path string) (CorpusIndex, error) { return CorpusIndex{}, nil }
+		embedQueries = func(queries []string) ([][]float32, error) {
+			t.Fatal("embedQueries should not be called for an empty index")
+			return nil, nil
+		}
+
+		if _, err := TopSourcesPerQuery([]string{"a"}); err == nil {
+			t.Error("expected an error when the index holds no chunks")
+		}
+	})
+
+	t.Run("errors when embedding fails", func(t *testing.T) {
+		originalLoad, originalEmbed := loadCorpusIndex, embedQueries
+		defer func() { loadCorpusIndex, embedQueries = originalLoad, originalEmbed }()
+
+		loadCorpusIndex = func(path string) (CorpusIndex, error) { return index, nil }
+		embedQueries = func(queries []string) ([][]float32, error) {
+			return nil, errors.New("rate limited")
+		}
+
+		if _, err := TopSourcesPerQuery([]string{"a"}); err == nil {
+			t.Error("expected an error when embedding fails")
+		}
+	})
+}
+
+func TestTopScoresPerQuery(t *testing.T) {
+	index := CorpusIndex{Chunks: []Chunk{
+		{Source: "readme-a.md", Text: "east", Embedding: []float32{1, 0}},
+		{Source: "notes-b.md", Text: "north", Embedding: []float32{0, 1}},
+	}}
+
+	t.Run("returns k scores per query, highest first", func(t *testing.T) {
+		originalLoad, originalEmbed := loadCorpusIndex, embedQueries
+		defer func() { loadCorpusIndex, embedQueries = originalLoad, originalEmbed }()
+
+		loadCorpusIndex = func(path string) (CorpusIndex, error) { return index, nil }
+		embedQueries = func(queries []string) ([][]float32, error) {
+			return [][]float32{{0.6, 0.8}}, nil
+		}
+
+		got, err := TopScoresPerQuery([]string{"a"}, 2)
+		if err != nil {
+			t.Fatalf("TopScoresPerQuery returned error: %v", err)
+		}
+		if len(got) != 1 || len(got[0]) != 2 {
+			t.Fatalf("scores = %v, want one query with 2 scores", got)
+		}
+		if math.Abs(got[0][0]-0.8) > 1e-6 || math.Abs(got[0][1]-0.6) > 1e-6 {
+			t.Errorf("scores = %v, want [0.8 0.6]", got[0])
+		}
+	})
+
+	t.Run("caps k at the index size", func(t *testing.T) {
+		originalLoad, originalEmbed := loadCorpusIndex, embedQueries
+		defer func() { loadCorpusIndex, embedQueries = originalLoad, originalEmbed }()
+
+		loadCorpusIndex = func(path string) (CorpusIndex, error) { return index, nil }
+		embedQueries = func(queries []string) ([][]float32, error) {
+			return [][]float32{{1, 0}}, nil
+		}
+
+		got, err := TopScoresPerQuery([]string{"a"}, 50)
+		if err != nil {
+			t.Fatalf("TopScoresPerQuery returned error: %v", err)
+		}
+		if len(got[0]) != 2 {
+			t.Errorf("scores = %v, want one per chunk in the index", got[0])
+		}
+	})
+}
+
 func TestRetrieveContext(t *testing.T) {
 	t.Run("returns top-k chunk texts, best match first", func(t *testing.T) {
 		originalLoad, originalEmbed := loadCorpusIndex, embedQuery

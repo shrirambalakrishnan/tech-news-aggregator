@@ -47,15 +47,18 @@ var CALIBRATION_FLOOR_STEPS = 10
 // DI seams (function-variable convention): tests swap these to calibrate
 // without touching the network or the git-ignored dataset.
 var (
-	topScoresPerQuery = rag.TopScoresPerQuery
-	loadDataset       = loadLabelledData
+	topScoresPerQuery  = rag.TopScoresPerQuery
+	topSourcesPerQuery = rag.TopSourcesPerQuery
+	loadDataset        = loadLabelledData
 )
 
 // scoredTitle pairs a labelled story with its best retrieval score — the number
-// the floor would be compared against for that story.
+// the floor would be compared against for that story — and the name of the
+// corpus file that score came from.
 type scoredTitle struct {
-	story LabelledStory
-	score float64
+	story  LabelledStory
+	score  float64
+	source string
 }
 
 // scoreSummary describes one label's score distribution. Percentiles rather than
@@ -72,9 +75,11 @@ type scoreSummary struct {
 // stdout (so it can be redirected to a file for plotting), and print the
 // evidence plus the decision on stderr.
 //
-// The report has three sections. The distribution table and the survival table
+// The report has four sections. The distribution table and the survival table
 // are the evidence — where the label-1 and label-0 scores sit, and what each
-// candidate floor would keep. The verdict section (floor_verdict.go) reads that
+// candidate floor would keep. The top-source table says which corpus files are
+// winning those matches, which is how a corpus change is checked for having
+// displaced anything. The verdict section (floor_verdict.go) reads the score
 // evidence and states the value to set, so the conclusion does not depend on
 // whoever is looking at the tables.
 func RunFloorCalibration() error {
@@ -107,18 +112,31 @@ func calibrateFloor(csvOut, reportOut io.Writer) error {
 		return fmt.Errorf("calibrate-floor: scored %d titles, expected %d", len(perStoryTop), len(dataset))
 	}
 
+	// Which document won, not just by how much. A second (free) Voyage round
+	// trip over the same titles: the scores alone cannot say whether a corpus
+	// addition displaced the files that were previously winning, which is the
+	// mechanism any corpus change is betting on (issue #22).
+	bestSources, err := topSourcesPerQuery(titles)
+	if err != nil {
+		return fmt.Errorf("calibrate-floor: %w", err)
+	}
+	if len(bestSources) != len(dataset) {
+		return fmt.Errorf("calibrate-floor: sourced %d titles, expected %d", len(bestSources), len(dataset))
+	}
+
 	scored := make([]scoredTitle, 0, len(dataset))
 	for i, story := range dataset {
 		if len(perStoryTop[i]) == 0 {
 			return fmt.Errorf("calibrate-floor: no chunk scored against %q", story.Title)
 		}
-		scored = append(scored, scoredTitle{story: story, score: perStoryTop[i][0]})
+		scored = append(scored, scoredTitle{story: story, score: perStoryTop[i][0], source: bestSources[i]})
 	}
 
 	if err := writeScoreCSV(csvOut, scored); err != nil {
 		return fmt.Errorf("calibrate-floor: failed to write CSV: %w", err)
 	}
 	writeFloorReport(reportOut, scored)
+	writeTopSourceReport(reportOut, scored)
 	writeVerdict(reportOut, buildFloorVerdict(scored, perStoryTop))
 	return nil
 }
@@ -133,13 +151,14 @@ func writeScoreCSV(w io.Writer, scored []scoredTitle) error {
 	out := csv.NewWriter(w)
 	defer out.Flush()
 
-	if err := out.Write([]string{"best_score", "label", "title"}); err != nil {
+	if err := out.Write([]string{"best_score", "label", "best_source", "title"}); err != nil {
 		return err
 	}
 	for _, s := range ranked {
 		row := []string{
 			strconv.FormatFloat(s.score, 'f', 4, 64),
 			strconv.Itoa(s.story.Label),
+			s.source,
 			s.story.Title,
 		}
 		if err := out.Write(row); err != nil {
@@ -183,6 +202,62 @@ func writeFloorReport(w io.Writer, scored []scoredTitle) {
 	}
 	fmt.Fprintf(w, "\nA usable floor shows up here as a row where the two columns pull apart.\n")
 	fmt.Fprintf(w, "This grid is coarse - the Verdict below sweeps every score and decides.\n\n")
+}
+
+// sourceTally counts how often one corpus file is a title's best match, split by
+// label. The split is what makes the table readable as more than trivia: a file
+// that wins mostly label-0 titles is supplying context for stories the reader
+// does not want.
+type sourceTally struct {
+	Source    string
+	Wins      int
+	WinsLabel int // of those wins, how many were on relevant (label 1) titles
+}
+
+// writeTopSourceReport prints which corpus files win the top-1 match, most
+// frequent first. It exists to make "did the new documents displace the old
+// winners?" a repeatable check rather than a claim: run calibrate-floor before
+// and after a corpus change and compare two tables. Free — the scores it reads
+// are already computed.
+func writeTopSourceReport(w io.Writer, scored []scoredTitle) {
+	fmt.Fprintf(w, "\n=== Top-1 match by corpus file ===\n")
+	fmt.Fprintf(w, "Which document wins each title's best match. Compare this table\n")
+	fmt.Fprintf(w, "before and after a corpus change to see what got displaced.\n\n")
+	fmt.Fprintf(w, "%12s %10s %10s  %s\n", "top-1 wins", "share", "on label 1", "source")
+
+	for _, t := range tallyTopSources(scored) {
+		fmt.Fprintf(w, "%12d %9.1f%% %10d  %s\n",
+			t.Wins, percentOf(t.Wins, len(scored)), t.WinsLabel, t.Source)
+	}
+	fmt.Fprintf(w, "\n")
+}
+
+// tallyTopSources is pure: it counts top-1 wins per source, ordered by wins
+// desc and then by name so equal counts print in a stable order.
+func tallyTopSources(scored []scoredTitle) []sourceTally {
+	position := map[string]int{}
+	tallies := []sourceTally{}
+
+	for _, s := range scored {
+		index, seen := position[s.source]
+		if !seen {
+			index = len(tallies)
+			position[s.source] = index
+			tallies = append(tallies, sourceTally{Source: s.source})
+		}
+		tallies[index].Wins++
+		if s.story.Label == 1 {
+			tallies[index].WinsLabel++
+		}
+	}
+
+	sort.SliceStable(tallies, func(i, j int) bool {
+		if tallies[i].Wins != tallies[j].Wins {
+			return tallies[i].Wins > tallies[j].Wins
+		}
+		return tallies[i].Source < tallies[j].Source
+	})
+	return tallies
 }
 
 func writeSummaryRow(w io.Writer, label string, s scoreSummary) {

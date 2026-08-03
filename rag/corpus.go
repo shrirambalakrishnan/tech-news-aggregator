@@ -47,8 +47,10 @@ func readCorpusFiles(dir string) ([]corpusFile, error) {
 
 // inferType categorises a corpus file from its name. The processed corpus is a
 // flat directory mixing blog posts ("blog ..."/"draft_..."), repo READMEs
-// ("readme-..."), and white papers (the large .txt files). Best-effort only;
-// Source is the authoritative field.
+// ("readme-..."), white papers (the large .txt files), and the reading notes
+// the user takes while reading ("notes-..."/"note-..."). Best-effort only;
+// Source is the authoritative field, and no retrieval or ranking code reads
+// Type at all — it exists to make the index inspectable (e.g. `jq`).
 func inferType(filename string) string {
 	name := strings.ToLower(filename)
 	switch {
@@ -56,6 +58,10 @@ func inferType(filename string) string {
 		return "readme"
 	case strings.HasPrefix(name, "blog"), strings.HasPrefix(name, "draft"):
 		return "blog"
+	// Matches both "note-*" and "notes-*", so the naming of the reading-notes
+	// files does not have to be settled before they land in the corpus.
+	case strings.HasPrefix(name, "note"):
+		return "note"
 	case strings.HasSuffix(name, ".txt"):
 		return "whitepaper"
 	default:

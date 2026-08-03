@@ -308,6 +308,62 @@ func BestSimilarityPerQuery(queries []string) ([]float64, error) {
 // index internals, and it costs one Voyage request per batch of queries and no
 // Claude call at all.
 func TopScoresPerQuery(queries []string, k int) ([][]float64, error) {
+	perQuery, err := topChunksPerQuery(queries, k)
+	if err != nil {
+		return nil, err
+	}
+
+	scoresPerQuery := make([][]float64, 0, len(perQuery))
+	for _, ranked := range perQuery {
+		scores := make([]float64, 0, len(ranked))
+		for _, sc := range ranked {
+			scores = append(scores, sc.score)
+		}
+		scoresPerQuery = append(scoresPerQuery, scores)
+	}
+	return scoresPerQuery, nil
+}
+
+// TopSourcesPerQuery returns, for each query in order, the FILENAME of its
+// best-matching corpus chunk (Chunk.Source) — "which document won this story?".
+//
+// It answers a question the scores alone cannot: whether a corpus change
+// actually displaced the documents that were previously winning. Before reading
+// notes were added, one README was the top match for 86 of the 341 labelled
+// titles; whether that share drops is the most direct evidence for the
+// displacement a corpus addition is betting on, and it costs no Claude call.
+//
+// Sources only, never chunk text — same boundary as TopScoresPerQuery: a caller
+// holding filenames cannot accidentally turn a measurement into a retrieval.
+// A query whose ranking is empty yields "" (only possible on an empty index,
+// which is rejected before embedding).
+//
+// Cost: one Voyage request per batch of queries (voyageapi.EmbedQueries),
+// $0.00 on the free tier. Calling it alongside TopScoresPerQuery re-embeds the
+// same queries, so calibration pays two paced round trips instead of one — free
+// but not instant at 3 RPM.
+func TopSourcesPerQuery(queries []string) ([]string, error) {
+	perQuery, err := topChunksPerQuery(queries, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	sources := make([]string, 0, len(perQuery))
+	for _, ranked := range perQuery {
+		if len(ranked) == 0 {
+			sources = append(sources, "")
+			continue
+		}
+		sources = append(sources, ranked[0].chunk.Source)
+	}
+	return sources, nil
+}
+
+// topChunksPerQuery is the shared body of the measurement functions above: load
+// the index, embed every query in one request, and rank the whole index against
+// each. It stays unexported so the chunk texts it carries never leave the
+// package — the exported wrappers project out one field each.
+func topChunksPerQuery(queries []string, k int) ([]scoredChunks, error) {
 	index, err := loadCorpusIndex(CORPUS_INDEX_FILE)
 	if err != nil {
 		return nil, fmt.Errorf("corpus index unavailable: %w", err)
@@ -324,19 +380,13 @@ func TopScoresPerQuery(queries []string, k int) ([][]float64, error) {
 		return nil, fmt.Errorf("embedded %d queries, expected %d", len(queryVecs), len(queries))
 	}
 
-	perQuery := make([][]float64, 0, len(queryVecs))
+	perQuery := make([]scoredChunks, 0, len(queryVecs))
 	for _, vec := range queryVecs {
-		scores := make([]float64, 0, len(index.Chunks))
+		ranked := make(scoredChunks, 0, len(index.Chunks))
 		for _, chunk := range index.Chunks {
-			scores = append(scores, cosineSimilarity(vec, chunk.Embedding))
+			ranked = append(ranked, scoredChunk{chunk: chunk, score: cosineSimilarity(vec, chunk.Embedding)})
 		}
-		sort.Sort(sort.Reverse(sort.Float64Slice(scores)))
-
-		top := min(k, len(scores))
-		if top < 0 {
-			top = 0
-		}
-		perQuery = append(perQuery, scores[:top])
+		perQuery = append(perQuery, ranked.sortedByScoreDesc().truncatedTo(k))
 	}
 	return perQuery, nil
 }

@@ -81,6 +81,73 @@ When the script tries to filter the interested news items
 		- In Step 1 - For creating RAG embeddings
 		- In Step 2 - For creating query vector based on news items
 
+### Approach 5 - Add the user's reading notes to the corpus
+---
+
+#### Solution
+
+The corpus so far covers what the user **built** (repo READMEs), **published** (blogs)
+and **studied** (white papers) — but not what they have been **reading recently**.
+Reading notes close that gap: drop `notes-*.md` files (blog title, URL, then the
+bullets taken while reading) into `profile/corpus/` and re-run `embed`.
+
+Tried on **arm 2 only**, as an experiment.
+
+**No retrieval change is needed.** `readCorpusFiles` already reads every regular,
+non-hidden file in `profile/corpus/`, so notes are chunked and embedded with no
+wiring; retrieval, ranking, `RETRIEVAL_TOP_K` and the arm 2 prompt are untouched.
+The only code change is a `note` case in `rag.inferType` — and even that is
+cosmetic, since `Chunk.Type` is written into the index for inspection (`jq`) and
+never read by retrieval.
+
+#### Notes
+
+- **Not purely "more corpus".** A note is ~50 words against an 800-word chunk
+  window, so each note becomes one short chunk, and short chunks tend to score
+  higher against short titles. Notes are expected to take a disproportionate share
+  of the top-5 — that is the intended displacement mechanism, but it means the
+  change is "more corpus **and** shorter chunks".
+- **Predicted ranking outcome, measured free before spending:** a bare regex for
+  `AI|LLM|GPT|agent|…` scores AUC **0.6713** on the labelled set, against the full
+  RAG pipeline's **0.6580**. AI-ish titles are 90 of 341 and hold 20 of the 35
+  positives (22.2% relevant vs 6.0% elsewhere), so topic is a real signal — but
+  *within* the AI group the corpus separates relevant from irrelevant by
+  **+0.0005**, i.e. not at all. So a post-notes `calibrate-floor` AUC near 0.66 is
+  the **predicted** result, not a failure; the bet is on excerpt usefulness to
+  Claude, which only the eval can see.
+- **Precision risk:** 70 of those 90 AI-ish titles are irrelevant, so better
+  AI-*topic* retrieval means flagging more from a group that is 78% wrong. Notes
+  could plausibly *lower* precision — the retrieval-key confirmation-bias failure
+  mode, now with concrete evidence behind it.
+
+#### Acceptance criteria
+
+| Side | Criterion | Why |
+|--|--|--|
+| Hold ground | recall ≥ 0.40 **and** TP ≥ 14 | arm 2's current position |
+| Don't buy it with false alarms | precision ≥ 0.1667 **and** FP < 70 | arm 2's current numbers |
+| Win condition | recall > 0.50 at precision ≥ 0.1667 | a single run wobbles ~±0.04 recall at 35 positives |
+
+#### Run order
+
+`profile/corpus_index.json` is a single unversioned file, so `embed` destroys the
+pre-notes state. Snapshot and measure the baseline first:
+
+```bash
+cp profile/corpus_index.json profile/corpus_index.pre-notes.json
+go run . calibrate-floor > profile/scores-pre-notes.csv   # baseline ranking + top-source table ($0.00)
+go run . eval 2                                           # fresh baseline, same session (~$0.08)
+# ... add notes-*.md to profile/corpus/ ...
+go run . embed                                            # ~20 min, $0.00
+go run . calibrate-floor > profile/scores-notes.csv       # free ranking + displacement check
+go run . eval 2                                           # the after-run (~$0.08)
+```
+
+Restore with `cp profile/corpus_index.pre-notes.json profile/corpus_index.json`.
+Arm 3 reads the same index, so **its recorded numbers go stale once `embed`
+re-runs**. `profile/corpus_index*.json` and `profile/scores*.csv` are git-ignored,
+so neither the snapshot nor the CSVs get committed.
+
 ## Run modes (arms)
 
 - The classifier flow is selected **explicitly** by an `arm` argument.
@@ -113,7 +180,17 @@ go run . eval 2         # eval under arm 2 — slow on Voyage's free tier, see b
 go run . calibrate-floor > scores.csv   # measure rag.RETRIEVAL_SIMILARITY_FLOOR (free, no Claude call)
 go run . 3              # normal run, arm 3 (RAG, per-story retrieval)
 go run . eval 3         # eval under arm 3 — same free-tier throttling as arm 2
+
+# Approach 5 — reading notes in the corpus (arm 2); full run order above
+go run . embed          # picks up notes-*.md with no other wiring
 ```
+
+`calibrate-floor` writes the per-title CSV (`best_score,label,best_source,title`)
+to **stdout** and its report — distribution, survival, **top-1 match by corpus
+file**, and the verdict — to **stderr**, so `> scores.csv` keeps the two apart.
+The `best_source` column and the top-source table are what make "did a corpus
+change displace the documents that were winning?" a repeatable check: run the
+command before and after the change and diff the tables.
 
 ## Eval - Execution results
 
@@ -209,6 +286,13 @@ dilutes the signal, and re-testing at the
 retrieval layer via `calibrate-floor` is free), wider corpus coverage, then
 reranking — evaluated first as a scoring function (AUC on a subsample) before any
 arm is wired.
+
+**Pending: Approach 5 (reading notes in the corpus).** The code is in; the numbers
+are not — the notes and the re-`embed` come next, and the before/after
+`calibrate-floor` + `eval 2` results get recorded here either way. Every number in
+this section was measured against the **pre-notes** index; once `embed` re-runs
+over the notes, arm 3's row in particular goes stale, since it reads the same
+index and will not be re-run.
 
 ## Setup
 

@@ -115,8 +115,8 @@ func TestScoresForLabel(t *testing.T) {
 
 func TestWriteScoreCSV(t *testing.T) {
 	scored := []scoredTitle{
-		{story: LabelledStory{Title: "low, with comma", Label: 0}, score: 0.1},
-		{story: LabelledStory{Title: "high", Label: 1}, score: 0.9},
+		{story: LabelledStory{Title: "low, with comma", Label: 0}, score: 0.1, source: "readme-a.md"},
+		{story: LabelledStory{Title: "high", Label: 1}, score: 0.9, source: "notes-b.md"},
 	}
 
 	var buf bytes.Buffer
@@ -128,16 +128,51 @@ func TestWriteScoreCSV(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("expected header + 2 rows, got %q", buf.String())
 	}
-	if lines[0] != "best_score,label,title" {
+	if lines[0] != "best_score,label,best_source,title" {
 		t.Errorf("header = %q", lines[0])
 	}
 	// Best-scoring first, so the head of the file is the most-supported stories.
-	if lines[1] != "0.9000,1,high" {
+	if lines[1] != "0.9000,1,notes-b.md,high" {
 		t.Errorf("first row = %q, want the highest score", lines[1])
 	}
 	// A title containing a comma must be quoted, not split into extra columns.
-	if lines[2] != `0.1000,0,"low, with comma"` {
+	if lines[2] != `0.1000,0,readme-a.md,"low, with comma"` {
 		t.Errorf("second row = %q, want the title quoted", lines[2])
+	}
+}
+
+func TestTallyTopSources(t *testing.T) {
+	scored := []scoredTitle{
+		{story: LabelledStory{Label: 0}, source: "readme-a.md"},
+		{story: LabelledStory{Label: 1}, source: "notes-b.md"},
+		{story: LabelledStory{Label: 0}, source: "readme-a.md"},
+		{story: LabelledStory{Label: 1}, source: "readme-a.md"},
+	}
+
+	got := tallyTopSources(scored)
+	want := []sourceTally{
+		{Source: "readme-a.md", Wins: 3, WinsLabel: 1},
+		{Source: "notes-b.md", Wins: 1, WinsLabel: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tally = %+v, want %+v", got, want)
+	}
+}
+
+func TestWriteTopSourceReport(t *testing.T) {
+	scored := []scoredTitle{
+		{story: LabelledStory{Title: "one", Label: 1}, score: 0.8, source: "notes-b.md"},
+		{story: LabelledStory{Title: "two", Label: 0}, score: 0.2, source: "readme-a.md"},
+	}
+
+	var buf bytes.Buffer
+	writeTopSourceReport(&buf, scored)
+	out := buf.String()
+
+	for _, want := range []string{"Top-1 match by corpus file", "notes-b.md", "readme-a.md", "50.0%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -155,9 +190,26 @@ func fakeDataset(t *testing.T) []LabelledStory {
 	return dataset
 }
 
+// fakeSources installs a stand-in for the second (top-1 source) measurement so
+// calibration tests never reach the index or Voyage. Callers that expect an
+// earlier failure pass no sources: the fake then fails the test if it is called.
+func fakeSources(t *testing.T, sources ...string) {
+	t.Helper()
+	original := topSourcesPerQuery
+	topSourcesPerQuery = func(queries []string) ([]string, error) {
+		if len(sources) == 0 {
+			t.Error("sourcing should not run after an earlier failure")
+			return nil, errors.New("unexpected call")
+		}
+		return sources, nil
+	}
+	t.Cleanup(func() { topSourcesPerQuery = original })
+}
+
 func TestCalibrateFloor(t *testing.T) {
 	t.Run("scores every labelled title and writes both outputs", func(t *testing.T) {
 		dataset := fakeDataset(t)
+		fakeSources(t, "notes-recent.md", "readme-tech-news-aggregator.md")
 		originalScorer := topScoresPerQuery
 		defer func() { topScoresPerQuery = originalScorer }()
 
@@ -183,11 +235,15 @@ func TestCalibrateFloor(t *testing.T) {
 		}
 		// The distribution is built from each story's BEST chunk (element 0),
 		// which is what the floor is compared against.
-		if !strings.Contains(csvOut.String(), "0.8000,1,a relevant story") {
+		if !strings.Contains(csvOut.String(), "0.8000,1,notes-recent.md,a relevant story") {
 			t.Errorf("CSV missing the scored row:\n%s", csvOut.String())
 		}
 		if !strings.Contains(reportOut.String(), "Survival at candidate floors") {
 			t.Errorf("report not written to its own stream:\n%s", reportOut.String())
+		}
+		// The displacement check: which file won each title's best match.
+		if !strings.Contains(reportOut.String(), "Top-1 match by corpus file") {
+			t.Errorf("report is missing the top-source table:\n%s", reportOut.String())
 		}
 		if !strings.Contains(reportOut.String(), "RECOMMENDATION") {
 			t.Errorf("report is missing the verdict section:\n%s", reportOut.String())
@@ -199,6 +255,7 @@ func TestCalibrateFloor(t *testing.T) {
 
 	t.Run("errors when a title scores against no chunk", func(t *testing.T) {
 		fakeDataset(t)
+		fakeSources(t, "readme-a.md", "readme-b.md")
 		originalScorer := topScoresPerQuery
 		defer func() { topScoresPerQuery = originalScorer }()
 
@@ -213,6 +270,7 @@ func TestCalibrateFloor(t *testing.T) {
 
 	t.Run("errors when scoring fails", func(t *testing.T) {
 		fakeDataset(t)
+		fakeSources(t)
 		originalScorer := topScoresPerQuery
 		defer func() { topScoresPerQuery = originalScorer }()
 
@@ -227,6 +285,7 @@ func TestCalibrateFloor(t *testing.T) {
 
 	t.Run("errors when the scorer returns the wrong count", func(t *testing.T) {
 		fakeDataset(t)
+		fakeSources(t)
 		originalScorer := topScoresPerQuery
 		defer func() { topScoresPerQuery = originalScorer }()
 
@@ -239,7 +298,42 @@ func TestCalibrateFloor(t *testing.T) {
 		}
 	})
 
+	t.Run("errors when sourcing fails", func(t *testing.T) {
+		fakeDataset(t)
+		originalScorer, originalSourcer := topScoresPerQuery, topSourcesPerQuery
+		defer func() { topScoresPerQuery, topSourcesPerQuery = originalScorer, originalSourcer }()
+
+		topScoresPerQuery = func(queries []string, k int) ([][]float64, error) {
+			return [][]float64{{0.8}, {0.2}}, nil
+		}
+		topSourcesPerQuery = func(queries []string) ([]string, error) {
+			return nil, errors.New("corpus index unavailable")
+		}
+
+		if err := calibrateFloor(io.Discard, io.Discard); err == nil {
+			t.Error("expected an error when sourcing fails")
+		}
+	})
+
+	t.Run("errors when the sourcer returns the wrong count", func(t *testing.T) {
+		fakeDataset(t)
+		// One source for two titles: silently zipping them would attribute
+		// scores to the wrong file, which is the whole point of the column.
+		fakeSources(t, "readme-a.md")
+		originalScorer := topScoresPerQuery
+		defer func() { topScoresPerQuery = originalScorer }()
+
+		topScoresPerQuery = func(queries []string, k int) ([][]float64, error) {
+			return [][]float64{{0.8}, {0.2}}, nil
+		}
+
+		if err := calibrateFloor(io.Discard, io.Discard); err == nil {
+			t.Error("expected an error on source/title count mismatch")
+		}
+	})
+
 	t.Run("errors when the dataset is missing", func(t *testing.T) {
+		fakeSources(t)
 		originalLoad, originalScorer := loadDataset, topScoresPerQuery
 		defer func() { loadDataset, topScoresPerQuery = originalLoad, originalScorer }()
 

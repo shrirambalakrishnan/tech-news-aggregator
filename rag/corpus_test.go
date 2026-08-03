@@ -13,7 +13,9 @@ func TestInferType(t *testing.T) {
 		"blog how raft works":  "blog",
 		"draft_designing_apis": "blog",
 		"dynamo.txt":           "whitepaper",
-		"notes.pdf":            "unknown",
+		"notes-agentic-rag.md": "note",
+		"note-transformers.md": "note",
+		"scratch.pdf":          "unknown",
 	}
 	for filename, want := range cases {
 		if got := inferType(filename); got != want {
