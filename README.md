@@ -212,19 +212,19 @@ Columns are labelled by **arm** (the CLI argument), since the "Approach N" numbe
 above is offset by one and would collide here.
 
 #### Confusion matrix
-| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) |
-|--|--|--|--|--|
-| TP (hit, flagged & relevant) | 14 | 4 | 14 | 10 |
-| FP (false alarm, flagged but dud) | 120 | 8 | 70 | 63 |
-| TN (correct skip) | 186 | 298 | 236 | 243 |
-| FN (miss, skipped but relevant) | 21 | 31 | 21 | 25 |
+| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 3 (RAG, per-story + notes)
+|--|--|--|--|--|--|
+| TP (hit, flagged & relevant) | 14 | 4 | 14 | 10 | 22 |
+| FP (false alarm, flagged but dud) | 120 | 8 | 70 | 63 | 80 |
+| TN (correct skip) | 186 | 298 | 236 | 243 | 226 |
+| FN (miss, skipped but relevant) | 21 | 31 | 21 | 25 | 13 |
 
 #### Metrics
 
-| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) |
-|--|--|--|--|--|
-| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 |
-| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 |
+| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 3 (RAG, per-story + notes)
+|--|--|--|--|--|--|
+| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 | 0.2157 |
+| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 | 0.6286 |
 
 #### Run-to-run variance — measured for arm 2 (n = 3)
 
