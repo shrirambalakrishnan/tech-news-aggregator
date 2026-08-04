@@ -150,26 +150,34 @@ go run . eval 2         # arm 2 is unchanged; only the corpus behind it widened
 341 labelled stories, 35 relevant (~10% base rate). One run per arm — the model is
 non-deterministic, so these are point estimates, not settled values.
 
-Columns are labelled by **arm** (the CLI argument), since the "Approach N" numbering
-above is offset by one and would collide here.
+Rows are labelled by **arm** (the CLI argument), since the "Approach N" numbering
+above is offset by one and would collide here. **One row per run** — add a new row
+for each result rather than widening the table.
 
-The last column is arm 2 run against the **post-notes** corpus (Approach 5); every
-other column was measured against the pre-notes index.
+The last two rows were run against the **post-notes** corpus (Approach 5); every
+other row was measured against the pre-notes index.
 
 #### Confusion matrix
-| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 2 (RAG, blended query + notes) | Arm 3 (RAG, per-story + notes)
-|--|--|--|--|--|--|--|
-| TP (hit, flagged & relevant) | 14 | 4 | 14 | 10 | 22 | 19 |
-| FP (false alarm, flagged but dud) | 120 | 8 | 70 | 63 | 80 | 76 |
-| TN (correct skip) | 186 | 298 | 236 | 243 | 226 | 230 |
-| FN (miss, skipped but relevant) | 21 | 31 | 21 | 25 | 13 | 16 |
+
+| Run | TP (hit, flagged & relevant) | FP (false alarm, flagged but dud) | TN (correct skip) | FN (miss, skipped but relevant) |
+|--|--|--|--|--|
+| Arm 0 (static) | 14 | 120 | 186 | 21 |
+| Arm 1 (interests) | 4 | 8 | 298 | 31 |
+| Arm 2 (RAG, blended query) | 14 | 70 | 236 | 21 |
+| Arm 3 (RAG, per-story) | 10 | 63 | 243 | 25 |
+| Arm 2 (RAG, blended query + notes) | 22 | 80 | 226 | 13 |
+| Arm 3 (RAG, per-story + notes) | 19 | 76 | 230 | 16 |
 
 #### Metrics
 
-| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 2 (RAG, blended query + notes) | Arm 3 (RAG, per-story + notes) | 
-|--|--|--|--|--|--|--|
-| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 | 0.2157 | 0.2000 |
-| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 | 0.6286 | 0.5429 |
+| Run | Precision (of flagged, % good) | Recall (of good, % caught) |
+|--|--|--|
+| Arm 0 (static) | 0.1045 | 0.4000 |
+| Arm 1 (interests) | 0.3333 | 0.1143 |
+| Arm 2 (RAG, blended query) | 0.1667 | 0.4000 |
+| Arm 3 (RAG, per-story) | 0.1370 | 0.2857 |
+| Arm 2 (RAG, blended query + notes) | 0.2157 | 0.6286 |
+| Arm 3 (RAG, per-story + notes) | 0.2000 | 0.5429 |
 
 #### Reading the results
 
@@ -205,7 +213,7 @@ chunks are 1.2% of the index and take the top-1 match for 158 of 341 labelled
 titles, pushing the previous leader — a repo README — from 120 top-1 wins to 49.
 That much is measured. Whether they win on chunk length or on topical overlap
 with an AI-heavy title stream is not separated, and separating it would mean
-re-chunking, which invalidates every other column in the table. Issue #22's
+re-chunking, which invalidates every other row in the table. Issue #22's
 pre-run prediction that it was length does **not** survive checking and is
 retracted in that thread.
 
