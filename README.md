@@ -81,6 +81,46 @@ When the script tries to filter the interested news items
 		- In Step 1 - For creating RAG embeddings
 		- In Step 2 - For creating query vector based on news items
 
+### Approach 5 - Add the user's reading notes to the corpus
+---
+
+#### Solution
+
+- Approach 3's corpus covers three kinds of user data, but misses a fourth
+	- What the user **built** — repo READMEs
+	- What the user **published** — blogs
+	- What the user **studied** — white papers
+	- What the user has been **reading recently** — missing
+- Close that gap with the notes the user takes while reading
+- Tried on **arm 2 only**, as an experiment
+
+##### Step 1
+- Add the reading notes to the corpus as `notes-*.md` files in `profile/corpus/`
+	- One file per reading session: the blog's title, its URL, then the bullets taken while reading
+- Re-run `embed` to rebuild `profile/corpus_index.json` over the widened corpus
+
+##### Step 2
+- Classify with arm 2 exactly as before — retrieval now selects from a corpus that
+  includes the notes
+- **No retrieval change is needed for any of this**
+	- `readCorpusFiles` already reads every regular, non-hidden file in `profile/corpus/`, so notes are chunked and embedded with no wiring at all
+	- `RETRIEVAL_TOP_K`, `cosineSimilarity`, `topKBySimilarity`, `RetrieveContext` and the arm 2 prompt are untouched
+	- The only production edit is a `note` case in `rag.inferType`, and even that is cosmetic — `Chunk.Type` is stamped at index-build time, never read by retrieval or ranking, and exists so the built index can be inspected with `jq`
+
+#### Notes
+- This is **not purely "more corpus"** — it is "more corpus **and** shorter chunks"
+	- A note is ~50 words against a `CHUNK_WINDOW_WORDS` = 800 window, so each note becomes a single short chunk
+	- Short chunks score higher against short titles, so notes take a disproportionate share of the top-5
+	- That *is* the intended displacement mechanism, but which half of it carries the measured gain is not separated
+- The arm 2 prompt is **deliberately left stale**
+	- `ragClassificationPrompt` still tells Claude the excerpts are "repository READMEs, blog posts, and white papers" — notes are not named
+	- Naming them would move prompt *wording* at the same time as the corpus, re-creating the arm 2 vs arm 3 confound on a new axis
+	- Whether naming notes helps is its own experiment
+- Arm 3 reads the **same index**
+	- Its recorded numbers were measured against the pre-notes corpus and go stale the moment `embed` re-runs
+	- Any arm 2 vs arm 3 comparison has to re-run both arms against the current index
+- The measured outcome is under *Eval - Execution results* below
+
 ## Run modes (arms)
 
 - The classifier flow is selected **explicitly** by an `arm` argument.
@@ -113,6 +153,10 @@ go run . eval 2         # eval under arm 2 — slow on Voyage's free tier, see b
 go run . calibrate-floor > scores.csv   # measure rag.RETRIEVAL_SIMILARITY_FLOOR (free, no Claude call)
 go run . 3              # normal run, arm 3 (RAG, per-story retrieval)
 go run . eval 3         # eval under arm 3 — same free-tier throttling as arm 2
+
+# Approach 5 — reading notes in the corpus (arm 2)
+go run . embed          # picks up notes-*.md with no other wiring
+go run . eval 2         # arm 2 is unchanged; only the corpus behind it widened
 ```
 
 ## Eval - Execution results
@@ -123,22 +167,58 @@ non-deterministic, so these are point estimates, not settled values.
 Columns are labelled by **arm** (the CLI argument), since the "Approach N" numbering
 above is offset by one and would collide here.
 
+The last column is arm 2 run against the **post-notes** corpus (Approach 5); every
+other column was measured against the pre-notes index.
+
 #### Confusion matrix
-| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) |
-|--|--|--|--|--|
-| TP (hit, flagged & relevant) | 14 | 4 | 14 | 10 |
-| FP (false alarm, flagged but dud) | 120 | 8 | 70 | 63 |
-| TN (correct skip) | 186 | 298 | 236 | 243 |
-| FN (miss, skipped but relevant) | 21 | 31 | 21 | 25 |
+| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 2 (RAG, blended query + notes) |
+|--|--|--|--|--|--|
+| TP (hit, flagged & relevant) | 14 | 4 | 14 | 10 | 22 |
+| FP (false alarm, flagged but dud) | 120 | 8 | 70 | 63 | 80 |
+| TN (correct skip) | 186 | 298 | 236 | 243 | 226 |
+| FN (miss, skipped but relevant) | 21 | 31 | 21 | 25 | 13 |
 
 #### Metrics
 
-| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) |
-|--|--|--|--|--|
-| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 |
-| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 |
+| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 2 (RAG, blended query + notes) |
+|--|--|--|--|--|--|
+| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 | 0.2157 |
+| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 | 0.6286 |
 
 #### Reading the results
+
+**Reading notes are the largest gain recorded so far.** Against the post-notes
+index arm 2 scored recall **0.6286** at precision **0.2157** — up from 0.4000 /
+0.1667 — clearing issue #22's win condition (recall > 0.50 at precision ≥ 0.1667)
+and its hold-ground criterion (22 TP against a floor of 14).
+
+**The one criterion it missed is FP < 70: false alarms rose to 80.** That target
+was set to make the recall gain unbuyable with false alarms, so the miss is real
+and is recorded as a miss. It reads mildly, though: precision rose at the same
+time, so the extra false alarms came attached to proportionally *more* true
+positives rather than being spent freely. Flagged count went 84 → 102, a net +18
+that decomposes as **+8 TP and +10 FP** — a 44% relevant rate on the net
+addition, against the 17% of arm 2's pre-notes flagged set overall. That is a
+*net* comparison, not a subset diff: the two flagged sets are not nested, so it
+bounds the trade rather than naming which stories moved.
+
+**The gain is large enough to clear the measured noise, unlike every other delta
+in this table.** Two repeat `eval 2` runs against the *same* pre-notes index
+scored recall 0.2571 and 0.3714 beside the tabled 0.4000 — mean **0.343 ±
+0.076**, precision mean **0.148 ± 0.022**. The tabled baseline is thus the best
+of three samples, and the post-notes run still sits ~3.8 standard errors above
+the baseline *mean*. The spread matches the ~8pp binomial standard error at 35
+positives, and since retrieval is deterministic given a fixed index, it is
+entirely Claude's sampling: `claudeapi.Request` sends no `temperature` field, so
+calls run at the API default of 1.0. Pinning it to 0 is the one-line lever if
+noise ever blocks a decision — not taken, because it would re-base every number
+in this section at once.
+
+**Read it as "more corpus and shorter chunks", not "more corpus".** A ~50-word
+note against an 800-word window becomes one short chunk that scores well against
+short titles, so notes displace longer excerpts by construction. Which half of
+that mechanism carries the gain is not separated here, and separating it would
+mean re-chunking — which invalidates every other column in the table.
 
 **Arm 3 did not beat arm 2.** It missed both acceptance targets set in issue #19
 (FP ≤ 35, recall ≥ 0.40): FP came in at 63 and recall at 0.2857.
@@ -192,23 +272,31 @@ already enforces by truncation, so no floor both fires and helps. Arm 3's number
 therefore measure per-story retrieval plus pooling, with floor-filtering never in
 effect.
 
-**Standing conclusions.** Arm 2 dominates arm 0 — identical recall (0.4000) at
-**60% fewer false positives** (70 vs 120) — so blended-query retrieval does pay
-for itself over the static ruleset. Arm 1 remains the precision leader (0.3333
-against a 10% base rate) at the worst recall by far, so the choice between arms 1
-and 2 is still a precision/recall preference, not a quality ranking. Arm 3 adds
-nothing over arm 2 **as configured**, and its estimated eval cost is ~3.5× arm 2's
+**Standing conclusions.** Arm 2 with notes is the best configuration measured:
+best recall of any arm by a wide margin (0.6286) at the second-best precision
+(0.2157), and the only recorded delta that clears the run-to-run noise. Corpus
+*content* has so far bought more than any retrieval-strategy change did. Without
+notes, arm 2 still dominates arm 0 — identical recall (0.4000) at **60% fewer
+false positives** (70 vs 120) — so blended-query retrieval does pay for itself
+over the static ruleset, though that "identical recall" compares two n=1 draws
+and arm 2's own mean is 0.343, not 0.4000. Arm 1 remains the precision leader
+(0.3333 against a 10% base rate) at the worst recall by far, so the choice
+between arms 1 and 2 is a precision/recall preference, not a quality ranking.
+Arm 3 adds nothing over arm 2 **as configured**, and its estimated eval cost is ~3.5× arm 2's
 (~$0.29 vs ~$0.08). That estimate assumes a full 20-chunk pool per call; it is the
 same assumption the confound above turns on, so it is a projection of arm 3's
 ceiling, not a measured bill.
 
-Next levers, in cost order: the cap-matched arm 2 vs arm 3 re-run above (~$0.16
-total, and the only way to attribute the recorded delta), smaller chunks
-(currently 800 words — a ~9-word title averaged against an 800-word window
-dilutes the signal, and re-testing at the
-retrieval layer via `calibrate-floor` is free), wider corpus coverage, then
-reranking — evaluated first as a scoring function (AUC on a subsample) before any
-arm is wired.
+Next levers, in cost order: repeat `eval 2` on the post-notes index a couple more
+times (~$0.08 each) — the notes result is n=1 against a baseline now known to
+swing ±7.6pp, and it is the number the next decision will lean on; then more
+reading notes, the cheapest lever with a measured payoff; then the cap-matched
+arm 2 vs arm 3 re-run above (~$0.16 total, and the only way to attribute that
+delta — note it must be re-run against the post-notes index, since arm 3's tabled
+numbers are now stale); then smaller chunks (currently 800 words — a ~9-word
+title averaged against an 800-word window dilutes the signal, and re-testing at
+the retrieval layer via `calibrate-floor` is free); then reranking — evaluated
+first as a scoring function (AUC on a subsample) before any arm is wired.
 
 ## Setup
 
