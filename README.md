@@ -167,6 +167,7 @@ other row was measured against the pre-notes index.
 | Arm 3 (RAG, per-story) | 10 | 63 | 243 | 25 |
 | Arm 2 (RAG, blended query + notes) | 22 | 80 | 226 | 13 |
 | Arm 3 (RAG, per-story + notes) | 19 | 76 | 230 | 16 |
+| Arm 3 (RAG, per-story + notes + similarity_floor) | 19 | 83 | 223 | 16 |
 
 #### Metrics
 
@@ -178,6 +179,7 @@ other row was measured against the pre-notes index.
 | Arm 3 (RAG, per-story) | 0.1370 | 0.2857 |
 | Arm 2 (RAG, blended query + notes) | 0.2157 | 0.6286 |
 | Arm 3 (RAG, per-story + notes) | 0.2000 | 0.5429 |
+| Arm 3 (RAG, per-story + notes + similarity_floor) | 0.1863 | 0.5429 |
 
 #### Reading the results
 
