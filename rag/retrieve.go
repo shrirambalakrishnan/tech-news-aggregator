@@ -26,16 +26,28 @@ var (
 	// one query standing in for ~30 stories.
 	RETRIEVAL_TOP_K_PER_STORY = 2
 
-	// RETRIEVAL_SIMILARITY_FLOOR drops chunks scoring below it, so a story with
-	// no real corpus support contributes nothing instead of contributing the
-	// least-irrelevant chunks. 0 keeps everything that is not anti-correlated,
-	// i.e. effectively no filtering: the correct value is a property of this
-	// corpus and must be MEASURED with `go run . calibrate-floor` (step 3 of
-	// the plan on issue #19) before arm 3 is scored. Guessing it would make
-	// "the floor didn't help" unfalsifiable — voyage-4-lite's dynamic range is
-	// unknown, and against a distribution clustered in 0.7–0.9 a guessed 0.4
-	// filters nothing.
-	RETRIEVAL_SIMILARITY_FLOOR = 0.0
+	// RETRIEVAL_SIMILARITY_FLOOR is a cosine similarity in [-1, 1]. Chunks
+	// scoring below it are dropped *before* the top-k cut, so a story with no
+	// real corpus support contributes nothing instead of contributing its
+	// least-irrelevant chunks.
+	//
+	// MEASURED, not guessed: `go run . calibrate-floor` against the post-notes
+	// index (2026-08-05) swept every observed score and returned 0.3330 — keeps
+	// 65.7% of relevant stories while dropping 68.0% of irrelevant ones, a
+	// 33.7pt gap. The separation underneath it is weak: AUC 0.690, d' 0.754,
+	// all three graded WEAK by the tool's own benchmarks.
+	//
+	// This is the first value that can actually fire. Pre-notes the best floor
+	// was 0.2336, below the ~0.32 that RETRIEVAL_POOL_CAP already enforces by
+	// truncation, so it was inert by construction. 0.3330 clears the post-notes
+	// cap median of 0.3216 — by 0.011. Simulated per batch it bites in 10 of 12
+	// and is dominated by the cap in the other 2, so expect a few chunks trimmed
+	// off the bottom of the pool, not a large change.
+	//
+	// It is fit on the same labelled set that then scores it, so any arm 3 gain
+	// it produces is optimistic. Re-measure after changing the corpus, the chunk
+	// size, or RETRIEVAL_POOL_CAP.
+	RETRIEVAL_SIMILARITY_FLOOR = 0.3330
 
 	// RETRIEVAL_POOL_CAP is the hard ceiling on pooled chunks per call. It is
 	// what keeps arm 3 retrieval rather than long-context stuffing: it bounds
