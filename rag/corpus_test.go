@@ -8,12 +8,17 @@ import (
 
 func TestInferType(t *testing.T) {
 	cases := map[string]string{
-		"readme-tech-news.md":  "readme",
-		"README.md":            "readme",
-		"blog how raft works":  "blog",
-		"draft_designing_apis": "blog",
-		"dynamo.txt":           "whitepaper",
-		"notes.pdf":            "unknown",
+		"readme-tech-news.md":   "readme",
+		"README.md":             "readme",
+		"blog how raft works":   "blog",
+		"draft_designing_apis":  "blog",
+		"dynamo.txt":            "whitepaper",
+		"notes-from-blogs-1.md": "note",
+		"note-on-raft.md":       "note",
+		// A note wins over the .txt suffix — otherwise reading notes saved as
+		// plain text would be typed as white papers.
+		"notes-on-paxos.txt": "note",
+		"scratch.pdf":        "unknown",
 	}
 	for filename, want := range cases {
 		if got := inferType(filename); got != want {
