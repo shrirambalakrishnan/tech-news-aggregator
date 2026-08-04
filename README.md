@@ -241,14 +241,14 @@ not: arm 2 injects exactly `RETRIEVAL_TOP_K` = 5 excerpts, arm 3 **up to**
 `RETRIEVAL_POOL_CAP` = 20. Every excerpt is ~800 words inlined verbatim, so arm
 3's prompt was larger — by up to 4×, and dilution and position effects in long
 stuffed contexts are a well-documented cause of exactly the kind of recall drop
-observed. *How much* larger is not actually recorded: the per-call token figure
-below is arithmetic **assuming** 20 chunks, not a measurement, so it cannot be
-cited as evidence the cap bound, and `calibrate-floor`'s pool-cap section is
-dedupe-blind. Only a `count_tokens` call or a dedupe-aware re-run settles it.
-**And it genuinely matters which:** "up to 20" includes 5, so if the deduped pool
-ran near 5 per batch there was no volume gap and the delta *is* attributable to
-selection after all. The confound is unresolved, not established — that is the
-whole reason the recorded delta can't be read either way. **So the recorded delta cannot distinguish
+observed. *How much* larger is now recorded, though only for the post-notes run:
+counting excerpts in the run log gives a mean of **18.9 per call**, with the cap
+binding at a full 20 in 10 of the 12 batches (see the floor section below). So the
+volume gap was real — "up to 20" was not secretly running near 5, and arm 3 really
+did inject ~4× arm 2's excerpts. That settles whether a gap existed, but not the
+attribution: these numbers still cannot say whether selection or size drove the
+delta. What speaks to *that* is the floored arm 3 run below, which cuts the pool
+to 7.1 and moves recall not at all. **So the recorded delta cannot on its own distinguish
 "per-story retrieval didn't help" from "the bigger prompt hurt".** The conclusion
 that survives regardless is the one from the retrieval statistics below (AUC
 0.659): the ranking both arms select from barely separates the classes.
@@ -265,11 +265,61 @@ both select from that same weak ranking and differ only in *how* they select. No
 selection strategy can rescue a ranking that barely separates the two classes, so
 the ceiling was already visible in the retrieval statistics.
 
-**`RETRIEVAL_SIMILARITY_FLOOR` shipped at 0.0 and is inert, not tested.** The best
-floor available (0.2336) sits *below* the ~0.32 that `RETRIEVAL_POOL_CAP = 20`
-already enforces by truncation, so no floor both fires and helps. Arm 3's numbers
-therefore measure per-story retrieval plus pooling, with floor-filtering never in
-effect.
+**`RETRIEVAL_SIMILARITY_FLOOR` was inert before the notes, and is not any more.**
+Against the pre-notes corpus the best available floor (0.2336) sat *below* the
+~0.32 that `RETRIEVAL_POOL_CAP = 20` already enforces by truncation, so no value
+both fired and helped — every arm 3 number above the last one was measured with
+floor-filtering never in effect. Re-calibrating against the post-notes corpus
+(issue #25) moved the best floor to **0.3330**, above the cap's threshold for the
+first time. It was set, and `eval 3` re-run.
+
+**The floor removes 63% of the retrieved context and changes nothing that
+matters.** Counting `--- Excerpt N ---` in the two run logs
+(`eval-run-logs/eval-3-run-post-notes` and `…-and-floor-set`) gives what each of
+the 12 Claude calls actually received:
+
+| Run | excerpts per batch (12 calls) | total | mean |
+|--|--|--|--|
+| Arm 3, no floor | 20 20 20 20 20 20 20 18 20 20 20 9 | 227 | 18.9 |
+| Arm 3, floor 0.3330 | 10 7 9 7 9 4 4 7 6 6 13 3 | 85 | 7.1 |
+
+**142 of 227 excerpts were dropped and not one relevant story was lost.** TP (19)
+and FN (16) are identical across the two runs — not close, identical. The entire
+delta is 7 stories moving from correct-skip to false-alarm, i.e. precision 0.2000
+→ 0.1863, a 0.62 standard-deviation move against the ±0.022 precision spread
+measured above. Re-running the same configuration moves precision more than the
+floor did.
+
+Cost follows the excerpt count: `eval 3` should now run around **$0.11–0.13**
+rather than ~$0.29. That part is mechanical. The accuracy-neutrality is not — the
+floor was fit on the same labelled set that then scored it, which is the most
+favourable evaluation it will ever get, so treat "costs nothing" as an optimistic
+reading until it is checked on data it was not tuned against.
+
+**This also weakens the excerpt-volume explanation for arm 3's deficit.** Floored,
+arm 3 runs at 7.1 excerpts per call — close to arm 2's fixed 5 — and its recall
+did not move at all (0.5429 both), still below arm 2's 0.6286. If prompt *size*
+had been what held arm 3 back, cutting it by 63% should have shown something. This
+is a directional null rather than proof (single runs, and the arm 2 → arm 3 recall
+gap is itself ~1 standard error), but it is the closest to a volume-matched
+comparison recorded so far, and it points at per-story selection simply not
+beating the blended query.
+
+**A forecast that failed, kept visible because the failure is instructive.** The
+floor was predicted to trim "a few chunks off the bottom of the pool": the
+calibration reports the cap's implied floor as a median of **0.3216**, which makes
+0.3330 look like it clears by 0.011. It trimmed 63%. That printed figure is
+explicitly an *upper bound* — it is computed before deduplication, and the deduped
+pool's 20th-ranked chunk sits well below it. Reading an upper bound as if it were
+the operating point produced the wrong forecast. The tool said so in its own
+output; the number was quoted and the caveat next to it was not.
+
+**Residual risk: an absolute floor can empty the pool.** The smallest observed was
+3 excerpts, so it did not happen here, but it can: `RETRIEVAL_POOL_CAP` is a
+*relative* threshold and always returns its 20 best, whereas a floor on a batch
+with no corpus support returns nothing and yields a prompt with no excerpts at
+all. Add a fallback — top-N ignoring the floor when the pool comes back empty —
+before anything depends on arm 3.
 
 **Standing conclusions.** Arm 2 with notes is the best configuration measured:
 best recall of any arm by a wide margin (0.6286) at the second-best precision
@@ -281,10 +331,12 @@ over the static ruleset, though that "identical recall" compares two n=1 draws
 and arm 2's own mean is 0.343, not 0.4000. Arm 1 remains the precision leader
 (0.3333 against a 10% base rate) at the worst recall by far, so the choice
 between arms 1 and 2 is a precision/recall preference, not a quality ranking.
-Arm 3 adds nothing over arm 2 **as configured**, and its estimated eval cost is ~3.5× arm 2's
-(~$0.29 vs ~$0.08). That estimate assumes a full 20-chunk pool per call; it is the
-same assumption the confound above turns on, so it is a projection of arm 3's
-ceiling, not a measured bill.
+Arm 3 adds nothing over arm 2 **as configured**, at ~3.5× arm 2's eval cost
+(~$0.29 vs ~$0.08). The 20-chunk-per-call assumption behind that estimate is now
+corroborated by the run log (mean 18.9), so it is close to the real bill rather
+than a ceiling projection. With `RETRIEVAL_SIMILARITY_FLOOR` = 0.3330 the pool
+falls to 7.1 and the cost with it, to roughly $0.11–0.13 — arm 3 gets
+substantially cheaper without getting any better.
 
 Next levers, in cost order: repeat `eval 2` on the post-notes index a couple more
 times (~$0.08 each) — the notes result is n=1 against a baseline now known to
