@@ -24,3 +24,5 @@ profile/corpus
 profile/corpus_index*.json
 
 profile/scores*.csv
+
+eval-run-logs
