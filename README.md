@@ -107,20 +107,6 @@ When the script tries to filter the interested news items
 	- `RETRIEVAL_TOP_K`, `cosineSimilarity`, `topKBySimilarity`, `RetrieveContext` and the arm 2 prompt are untouched
 	- The only production edit is a `note` case in `rag.inferType`, and even that is cosmetic — `Chunk.Type` is stamped at index-build time, never read by retrieval or ranking, and exists so the built index can be inspected with `jq`
 
-#### Notes
-- This is **not purely "more corpus"** — it is "more corpus **and** shorter chunks"
-	- A note is ~50 words against a `CHUNK_WINDOW_WORDS` = 800 window, so each note becomes a single short chunk
-	- Short chunks score higher against short titles, so notes take a disproportionate share of the top-5
-	- That *is* the intended displacement mechanism, but which half of it carries the measured gain is not separated
-- The arm 2 prompt is **deliberately left stale**
-	- `ragClassificationPrompt` still tells Claude the excerpts are "repository READMEs, blog posts, and white papers" — notes are not named
-	- Naming them would move prompt *wording* at the same time as the corpus, re-creating the arm 2 vs arm 3 confound on a new axis
-	- Whether naming notes helps is its own experiment
-- Arm 3 reads the **same index**
-	- Its recorded numbers were measured against the pre-notes corpus and go stale the moment `embed` re-runs
-	- Any arm 2 vs arm 3 comparison has to re-run both arms against the current index
-- The measured outcome is under *Eval - Execution results* below
-
 ## Run modes (arms)
 
 - The classifier flow is selected **explicitly** by an `arm` argument.
@@ -214,11 +200,14 @@ calls run at the API default of 1.0. Pinning it to 0 is the one-line lever if
 noise ever blocks a decision — not taken, because it would re-base every number
 in this section at once.
 
-**Read it as "more corpus and shorter chunks", not "more corpus".** A ~50-word
-note against an 800-word window becomes one short chunk that scores well against
-short titles, so notes displace longer excerpts by construction. Which half of
-that mechanism carries the gain is not separated here, and separating it would
-mean re-chunking — which invalidates every other column in the table.
+**Notes displace heavily, but why they win is not established.** The two note
+chunks are 1.2% of the index and take the top-1 match for 158 of 341 labelled
+titles, pushing the previous leader — a repo README — from 120 top-1 wins to 49.
+That much is measured. Whether they win on chunk length or on topical overlap
+with an AI-heavy title stream is not separated, and separating it would mean
+re-chunking, which invalidates every other column in the table. Issue #22's
+pre-run prediction that it was length does **not** survive checking and is
+retracted in that thread.
 
 **Arm 3 did not beat arm 2.** It missed both acceptance targets set in issue #19
 (FP ≤ 35, recall ≥ 0.40): FP came in at 63 and recall at 0.2857.
