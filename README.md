@@ -157,19 +157,19 @@ The last column is arm 2 run against the **post-notes** corpus (Approach 5); eve
 other column was measured against the pre-notes index.
 
 #### Confusion matrix
-| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 2 (RAG, blended query + notes) |
-|--|--|--|--|--|--|
-| TP (hit, flagged & relevant) | 14 | 4 | 14 | 10 | 22 |
-| FP (false alarm, flagged but dud) | 120 | 8 | 70 | 63 | 80 |
-| TN (correct skip) | 186 | 298 | 236 | 243 | 226 |
-| FN (miss, skipped but relevant) | 21 | 31 | 21 | 25 | 13 |
+| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 2 (RAG, blended query + notes) | Arm 3 (RAG, per-story + notes)
+|--|--|--|--|--|--|--|
+| TP (hit, flagged & relevant) | 14 | 4 | 14 | 10 | 22 | 19 |
+| FP (false alarm, flagged but dud) | 120 | 8 | 70 | 63 | 80 | 76 |
+| TN (correct skip) | 186 | 298 | 236 | 243 | 226 | 230 |
+| FN (miss, skipped but relevant) | 21 | 31 | 21 | 25 | 13 | 16 |
 
 #### Metrics
 
-| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 2 (RAG, blended query + notes) |
-|--|--|--|--|--|--|
-| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 | 0.2157 |
-| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 | 0.6286 |
+| Metric | Arm 0 (static) | Arm 1 (interests) | Arm 2 (RAG, blended query) | Arm 3 (RAG, per-story) | Arm 2 (RAG, blended query + notes) | Arm 3 (RAG, per-story + notes) | 
+|--|--|--|--|--|--|--|
+| Precision (of flagged, % good) | 0.1045 | 0.3333 | 0.1667 | 0.1370 | 0.2157 | 0.2000 |
+| Recall    (of good, % caught) | 0.4000 | 0.1143 | 0.4000 | 0.2857 | 0.6286 | 0.5429 |
 
 #### Reading the results
 
