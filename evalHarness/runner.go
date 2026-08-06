@@ -2,6 +2,7 @@ package evalHarness
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -61,26 +62,47 @@ func RunEval(arm hackernews_classifier.Arm) error {
 	// exit code still says something went wrong.
 	fmt.Print(metrics.Report())
 
-	return recordRun(runID, arm, metrics)
+	return recordRun(runID, arm, metrics, predictedIDs, dataset)
 }
 
 // recordRun writes the run's descriptive artifacts. Separated from RunEval so
 // the ordering rule above ("report first, then record") is visible at the call
 // site rather than buried in a tail of writes.
 //
+// Both artifacts are named by the SAME runID, computed once at the top of
+// RunEval rather than by each writer. Two independent timestamps taken seconds
+// apart can straddle a second boundary and leave a .json and a .csv that no
+// longer look like the same run.
+//
+// The CSV is written even when the record fails, and vice versa: they answer
+// different questions (aggregate counts vs per-story verdicts), so one being
+// unwritable is no reason to discard the other from a run already paid for.
+// Errors are joined so neither failure hides the other.
+//
 // A classification failure never reaches here: there are no metrics to record,
 // and a record of a run that produced no numbers would be misleading rather
 // than incomplete.
-func recordRun(runID string, arm hackernews_classifier.Arm, metrics Metrics) error {
+func recordRun(runID string, arm hackernews_classifier.Arm, metrics Metrics, predictedIDs []int, dataset []LabelledStory) error {
+	var failures []error
+
 	record, err := buildRunRecord(runID, arm, metrics)
 	if err != nil {
-		return fmt.Errorf("eval: failed to build run record for %s: %w", runID, err)
-	}
-	if err := writeRunRecord(record); err != nil {
-		return fmt.Errorf("eval: %w", err)
+		failures = append(failures, fmt.Errorf("failed to build run record for %s: %w", runID, err))
+	} else if err := writeRunRecord(record); err != nil {
+		failures = append(failures, err)
+	} else {
+		log.Printf("eval: wrote run record %s", filepath.Join(EVAL_RUNS_DIR, runID+".json"))
 	}
 
-	log.Printf("eval: wrote run record %s", filepath.Join(EVAL_RUNS_DIR, runID+".json"))
+	if err := writePredictionsCSV(runID, predictedIDs, dataset); err != nil {
+		failures = append(failures, err)
+	} else {
+		log.Printf("eval: wrote %d predictions to %s", len(dataset), filepath.Join(EVAL_RUNS_DIR, runID+".csv"))
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf("eval: %w", errors.Join(failures...))
+	}
 	return nil
 }
 
