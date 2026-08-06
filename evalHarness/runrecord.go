@@ -69,12 +69,21 @@ type RunMetrics struct {
 //     text). This is why a tuning change must be committed to be recorded -
 //     see headCommitSHA for the limitation that leaves.
 //   - Model    - the LLM that classified. Changing it re-bases every number.
+//   - DatasetHash / CorpusIndexHash - the data, which is git-ignored and mutable
+//     in place. Each hash names an archived copy under evalRuns/, so the bytes
+//     behind a past number are still recoverable. See artifacts.go.
+//
+// CorpusIndexHash is omitted entirely for arms 0 and 1: they never load the
+// index, and an empty string would read as "the index was empty" rather than
+// "the index was irrelevant here".
 type RunRecord struct {
-	RunID   string     `json:"run_id"`
-	Arm     int        `json:"arm"`
-	GitSHA  string     `json:"git_sha"`
-	Model   string     `json:"model"`
-	Metrics RunMetrics `json:"metrics"`
+	RunID           string     `json:"run_id"`
+	Arm             int        `json:"arm"`
+	GitSHA          string     `json:"git_sha"`
+	DatasetHash     string     `json:"dataset_hash"`
+	CorpusIndexHash string     `json:"corpus_index_hash,omitempty"`
+	Model           string     `json:"model"`
+	Metrics         RunMetrics `json:"metrics"`
 }
 
 // newRunID builds the run's identity: "<UTC timestamp>-arm-<N>". It is both the
@@ -104,19 +113,22 @@ func headCommitSHA() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// buildRunRecord assembles the record from the run's identity and its scored
-// metrics. Pure apart from the gitSHA seam, so the mapping is unit-testable.
-func buildRunRecord(runID string, arm hackernews_classifier.Arm, metrics Metrics) (RunRecord, error) {
+// buildRunRecord assembles the record from the run's identity, the hashes of the
+// data it read, and its scored metrics. Pure apart from the gitSHA seam, so the
+// mapping is unit-testable.
+func buildRunRecord(runID string, arm hackernews_classifier.Arm, artifacts runArtifacts, metrics Metrics) (RunRecord, error) {
 	sha, err := gitSHA()
 	if err != nil {
 		return RunRecord{}, err
 	}
 
 	return RunRecord{
-		RunID:  runID,
-		Arm:    int(arm),
-		GitSHA: sha,
-		Model:  claudeapi.ANTHROPIC_MODEL_NAME,
+		RunID:           runID,
+		Arm:             int(arm),
+		GitSHA:          sha,
+		DatasetHash:     artifacts.DatasetHash,
+		CorpusIndexHash: artifacts.CorpusIndexHash,
+		Model:           claudeapi.ANTHROPIC_MODEL_NAME,
 		Metrics: RunMetrics{
 			TP:        metrics.Confusion.TP,
 			FP:        metrics.Confusion.FP,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 // LABELLED_DATA_FILE is the hand-labelled dataset (git-ignored). Path is
@@ -47,6 +48,14 @@ func RunEval(arm hackernews_classifier.Arm) error {
 	}
 	log.Printf("eval: loaded %d labelled stories from %s", len(dataset), LABELLED_DATA_FILE)
 
+	// Snapshot the inputs before spending anything: free, local, and it pins the
+	// exact bytes the run is about to read. A failure here aborts rather than
+	// producing a number nobody can trace back to its data.
+	artifacts, err := archiveRunInputs(arm, LABELLED_DATA_FILE, rag.CORPUS_INDEX_FILE)
+	if err != nil {
+		return fmt.Errorf("eval: %w", err)
+	}
+
 	// Everything above this line is free. Everything below spends money.
 	predictedIDs, err := classifyInBatches(arm, dataset)
 	if err != nil {
@@ -62,7 +71,7 @@ func RunEval(arm hackernews_classifier.Arm) error {
 	// exit code still says something went wrong.
 	fmt.Print(metrics.Report())
 
-	return recordRun(runID, arm, metrics, predictedIDs, dataset)
+	return recordRun(runID, arm, artifacts, metrics, predictedIDs, dataset)
 }
 
 // recordRun writes the run's descriptive artifacts. Separated from RunEval so
@@ -82,10 +91,10 @@ func RunEval(arm hackernews_classifier.Arm) error {
 // A classification failure never reaches here: there are no metrics to record,
 // and a record of a run that produced no numbers would be misleading rather
 // than incomplete.
-func recordRun(runID string, arm hackernews_classifier.Arm, metrics Metrics, predictedIDs []int, dataset []LabelledStory) error {
+func recordRun(runID string, arm hackernews_classifier.Arm, artifacts runArtifacts, metrics Metrics, predictedIDs []int, dataset []LabelledStory) error {
 	var failures []error
 
-	record, err := buildRunRecord(runID, arm, metrics)
+	record, err := buildRunRecord(runID, arm, artifacts, metrics)
 	if err != nil {
 		failures = append(failures, fmt.Errorf("failed to build run record for %s: %w", runID, err))
 	} else if err := writeRunRecord(record); err != nil {

@@ -66,7 +66,8 @@ func TestBuildRunRecordMapsMetrics(t *testing.T) {
 		FalseNegatives: []LabelledStory{{StoryID: 2, Title: "missed"}},
 	}
 
-	record, err := buildRunRecord("20260806T091500Z-arm-2", hackernews_classifier.ArmRAG, metrics)
+	record, err := buildRunRecord("20260806T091500Z-arm-2", hackernews_classifier.ArmRAG,
+		runArtifacts{DatasetHash: "dataset-sha", CorpusIndexHash: "index-sha"}, metrics)
 	if err != nil {
 		t.Fatalf("buildRunRecord returned error: %v", err)
 	}
@@ -83,6 +84,12 @@ func TestBuildRunRecordMapsMetrics(t *testing.T) {
 	if record.Model != claudeapi.ANTHROPIC_MODEL_NAME {
 		t.Errorf("Model = %q, want %q", record.Model, claudeapi.ANTHROPIC_MODEL_NAME)
 	}
+	if record.DatasetHash != "dataset-sha" {
+		t.Errorf("DatasetHash = %q, want %q", record.DatasetHash, "dataset-sha")
+	}
+	if record.CorpusIndexHash != "index-sha" {
+		t.Errorf("CorpusIndexHash = %q, want %q", record.CorpusIndexHash, "index-sha")
+	}
 
 	want := RunMetrics{TP: 22, FP: 80, TN: 226, FN: 13, Precision: 0.2157, Recall: 0.6286}
 	if record.Metrics != want {
@@ -97,7 +104,7 @@ func TestBuildRunRecordPropagatesGitFailure(t *testing.T) {
 	withStubbedRecording(t, time.Now(), "")
 	gitSHA = func() (string, error) { return "", errors.New("not a git repository") }
 
-	if _, err := buildRunRecord("run-1", hackernews_classifier.ArmGeneric, Metrics{}); err == nil {
+	if _, err := buildRunRecord("run-1", hackernews_classifier.ArmGeneric, runArtifacts{}, Metrics{}); err == nil {
 		t.Fatal("expected an error when the git SHA is unavailable, got nil")
 	}
 }
@@ -144,24 +151,52 @@ func TestWriteRunRecordCreatesDirectory(t *testing.T) {
 	}
 }
 
-// TestRunRecordOmitsHashFieldsForNow guards the staging boundary: hashing and
-// archiving land separately, so a record written today carries no hash fields at
-// all. Without this, "no dataset_hash" reads as a bug rather than as sequencing.
-func TestRunRecordOmitsHashFieldsForNow(t *testing.T) {
+// TestRunRecordCorpusIndexHashPresence pins the acceptance criterion that arms 0
+// and 1 record NO corpus_index_hash. The distinction matters when reading a
+// record back: an absent field says "this arm does not use the index", whereas
+// an empty string would say "it used an index with no content".
+func TestRunRecordCorpusIndexHashPresence(t *testing.T) {
 	withStubbedRecording(t, time.Now(), "sha")
 
-	data, err := json.Marshal(RunRecord{RunID: "run-1"})
-	if err != nil {
-		t.Fatalf("marshal failed: %v", err)
+	tests := []struct {
+		name      string
+		arm       hackernews_classifier.Arm
+		artifacts runArtifacts
+		wantField bool
+	}{
+		{"arm 0 does not read the index", hackernews_classifier.ArmGeneric,
+			runArtifacts{DatasetHash: "d"}, false},
+		{"arm 1 does not read the index", hackernews_classifier.ArmInterests,
+			runArtifacts{DatasetHash: "d"}, false},
+		{"arm 2 reads the index", hackernews_classifier.ArmRAG,
+			runArtifacts{DatasetHash: "d", CorpusIndexHash: "i"}, true},
+		{"arm 3 reads the index", hackernews_classifier.ArmRAGPerStory,
+			runArtifacts{DatasetHash: "d", CorpusIndexHash: "i"}, true},
 	}
 
-	var fields map[string]any
-	if err := json.Unmarshal(data, &fields); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
-	}
-	for _, absent := range []string{"dataset_hash", "corpus_index_hash"} {
-		if _, present := fields[absent]; present {
-			t.Errorf("record should not carry %q yet", absent)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			record, err := buildRunRecord("run-1", test.arm, test.artifacts, Metrics{})
+			if err != nil {
+				t.Fatalf("buildRunRecord returned error: %v", err)
+			}
+			data, err := json.Marshal(record)
+			if err != nil {
+				t.Fatalf("marshal failed: %v", err)
+			}
+
+			var fields map[string]any
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatalf("unmarshal failed: %v", err)
+			}
+
+			if _, present := fields["corpus_index_hash"]; present != test.wantField {
+				t.Errorf("corpus_index_hash present = %v, want %v", present, test.wantField)
+			}
+			// dataset_hash is never omitted - every arm reads the dataset.
+			if _, present := fields["dataset_hash"]; !present {
+				t.Error("dataset_hash must be present for every arm")
+			}
+		})
 	}
 }
