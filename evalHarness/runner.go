@@ -2,12 +2,15 @@ package evalHarness
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
 // LABELLED_DATA_FILE is the hand-labelled dataset (git-ignored). Path is
@@ -30,24 +33,86 @@ var buildProfileForArm = armcontext.BuildProfile
 
 // RunEval is the `go run . eval <arm>` entrypoint: load the labelled data, run
 // the classifier over it in batches exactly as production would under the given
-// arm, score the predictions against the human labels, and print the report to
-// the console. It runs exactly one arm.
-func RunEval(arm hackernews_classifier.Arm) {
+// arm, score the predictions against the human labels, print the report to the
+// console, and record what the run used. It runs exactly one arm.
+//
+// It returns an error rather than calling log.Fatal so main keeps exactly one
+// exit point - which matters here because the report and the exit code are
+// decided separately: see the recording step below.
+func RunEval(arm hackernews_classifier.Arm) error {
+	runID := newRunID(arm)
+
 	dataset, err := loadLabelledData(LABELLED_DATA_FILE)
 	if err != nil {
-		log.Fatal("eval: failed to load labelled data: ", err)
+		return fmt.Errorf("eval: failed to load labelled data: %w", err)
 	}
 	log.Printf("eval: loaded %d labelled stories from %s", len(dataset), LABELLED_DATA_FILE)
 
+	// Snapshot the inputs before spending anything: free, local, and it pins the
+	// exact bytes the run is about to read. A failure here aborts rather than
+	// producing a number nobody can trace back to its data.
+	artifacts, err := archiveRunInputs(arm, LABELLED_DATA_FILE, rag.CORPUS_INDEX_FILE)
+	if err != nil {
+		return fmt.Errorf("eval: %w", err)
+	}
+
+	// Everything above this line is free. Everything below spends money.
 	predictedIDs, err := classifyInBatches(arm, dataset)
 	if err != nil {
-		log.Fatal("eval: ", err)
+		return fmt.Errorf("eval: %w", err)
 	}
 
 	metrics := Evaluate(predictedIDs, dataset)
 
-	// Console-log the full report (every metric + the FP/FN title lists).
+	// Console-log the full report (every metric + the FP/FN title lists) BEFORE
+	// recording. An eval run costs real money and ~10 minutes, so a failure to
+	// write the record must never cost the operator the report they paid for -
+	// hence print first, then record, then return the recording error so the
+	// exit code still says something went wrong.
 	fmt.Print(metrics.Report())
+
+	return recordRun(runID, arm, artifacts, metrics, predictedIDs, dataset)
+}
+
+// recordRun writes the run's descriptive artifacts. Separated from RunEval so
+// the ordering rule above ("report first, then record") is visible at the call
+// site rather than buried in a tail of writes.
+//
+// Both artifacts are named by the SAME runID, computed once at the top of
+// RunEval rather than by each writer. Two independent timestamps taken seconds
+// apart can straddle a second boundary and leave a .json and a .csv that no
+// longer look like the same run.
+//
+// The CSV is written even when the record fails, and vice versa: they answer
+// different questions (aggregate counts vs per-story verdicts), so one being
+// unwritable is no reason to discard the other from a run already paid for.
+// Errors are joined so neither failure hides the other.
+//
+// A classification failure never reaches here: there are no metrics to record,
+// and a record of a run that produced no numbers would be misleading rather
+// than incomplete.
+func recordRun(runID string, arm hackernews_classifier.Arm, artifacts runArtifacts, metrics Metrics, predictedIDs []int, dataset []LabelledStory) error {
+	var failures []error
+
+	record, err := buildRunRecord(runID, arm, artifacts, metrics)
+	if err != nil {
+		failures = append(failures, fmt.Errorf("failed to build run record for %s: %w", runID, err))
+	} else if err := writeRunRecord(record); err != nil {
+		failures = append(failures, err)
+	} else {
+		log.Printf("eval: wrote run record %s", filepath.Join(EVAL_RUNS_DIR, runID+".json"))
+	}
+
+	if err := writePredictionsCSV(runID, predictedIDs, dataset); err != nil {
+		failures = append(failures, err)
+	} else {
+		log.Printf("eval: wrote %d predictions to %s", len(dataset), filepath.Join(EVAL_RUNS_DIR, runID+".csv"))
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf("eval: %w", errors.Join(failures...))
+	}
+	return nil
 }
 
 // loadLabelledData reads and parses the JSON array of labelled stories.

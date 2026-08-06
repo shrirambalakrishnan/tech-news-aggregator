@@ -145,6 +145,69 @@ go run . embed          # picks up notes-*.md with no other wiring
 go run . eval 2         # arm 2 is unchanged; only the corpus behind it widened
 ```
 
+Every `eval` also writes a record of what it used to `evalRuns/` — see
+*Eval run records* below.
+
+## Eval run records (`evalRuns/`)
+
+Every `go run . eval <arm>` leaves two files behind, so a number in the table
+below can be traced back to what produced it. Both are named
+`<UTC timestamp>-arm-<N>` — e.g. `20260806T091500Z-arm-2` — which is also the
+record's `run_id`.
+
+| File | What it answers |
+|------|-----------------|
+| `evalRuns/<run_id>.json` | *What did this run use?* — arm, git SHA, model, the hashes of its data, and the confusion matrix |
+| `evalRuns/<run_id>.csv` | *What did it decide about each story?* — one row per dataset item: `run_id, story_id, title, label, predicted` |
+
+The JSON gives the counts; the CSV gives the per-story verdicts behind them.
+Comparing two runs is a `join` on `story_id` between their CSVs.
+
+```json
+{
+  "run_id": "20260806T091500Z-arm-2",
+  "arm": 2,
+  "git_sha": "fc057f7…",
+  "dataset_hash": "9f2c…",
+  "corpus_index_hash": "4a71…",
+  "model": "claude-haiku-4-5-20251001",
+  "metrics": { "tp": 22, "fp": 80, "tn": 226, "fn": 13,
+               "precision": 0.2157, "recall": 0.6286 }
+}
+```
+
+**Why the hashes.** The two inputs that decide the numbers — the labelled dataset
+and `profile/corpus_index.json` — are both git-ignored and overwritten in place.
+Approach 5 re-based every arm 2 and arm 3 number by re-embedding a widened
+corpus, and the pre-notes index survived only because it was `cp`'d by hand
+first. So each run archives its inputs content-addressed:
+
+```
+evalRuns/datasets/<sha256>.json       # the labelled dataset it scored against
+evalRuns/corpus_index/<sha256>.json   # the index it retrieved from (arms 2 & 3)
+```
+
+Write-if-absent, so repeat runs over unchanged inputs add nothing; a *changed*
+input is stored beside the old one rather than replacing a snapshot an earlier
+record still points at. The hash is plain sha256 of the file's raw bytes, so
+`shasum -a 256 profile/corpus_index.json` reproduces it. `go run . embed`
+archives the index too, which captures it at build time rather than at first
+eval.
+
+`corpus_index_hash` is **absent** for arms 0 and 1 — they never load the index.
+
+Two limitations worth knowing before trusting a record:
+
+- **`git_sha` is the last commit, not the working tree.** An uncommitted edit to
+  a tuning constant is invisible, so commit tuning changes before measuring them.
+- **Re-embedding an unchanged corpus produces a new hash**, because the index
+  stamps a fresh `generated_at` and the hash covers the whole file. Harmless —
+  it stores one extra copy — but it means "different hash" does not always mean
+  "different corpus".
+
+The whole directory is git-ignored: it is local run history, regenerable only by
+paying for another run.
+
 ## Eval - Execution results
 
 341 labelled stories, 35 relevant (~10% base rate). One run per arm — the model is

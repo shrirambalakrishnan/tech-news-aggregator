@@ -82,9 +82,22 @@ func runPrebuild() error {
 // runEmbed chunks profile/corpus, embeds each chunk via Voyage, and writes
 // profile/corpus_index.json - the index the RAG arms (2 and 3) retrieve from. Run
 // occasionally, not every 4h; requires VOYAGE_API_KEY in env.
+//
+// It then archives the index under evalRuns/ (issue #26). The eval flow archives
+// it too, so this is not what makes an index traceable - it is what makes it
+// traceable EARLY: an index built today and first evaluated next week would
+// otherwise be captured only at eval time, and any `embed` in between overwrites
+// it in place with no snapshot taken.
+//
+// ⚠️ rag.BuildCorpusIndex fails soft (it logs and returns nothing), so this
+// cannot tell a successful build from a failed one. On a failed build it
+// archives whichever index is still on disk - which is a truthful record of what
+// the RAG arms would read right now, just not evidence that this run produced
+// it. Making BuildCorpusIndex return an error would close that gap and is worth
+// doing; it is deliberately not bundled into the tracking change.
 func runEmbed() error {
 	rag.BuildCorpusIndex()
-	return nil
+	return evalHarness.ArchiveCorpusIndex()
 }
 
 // runCalibrateFloor picks the value of rag.RETRIEVAL_SIMILARITY_FLOOR.
@@ -122,6 +135,11 @@ func runCalibrateFloor() error {
 // precision/recall plus the misclassified titles. Offline quality check, not
 // part of the scheduled run. The arm is REQUIRED (no default) so an eval meant
 // for one arm can't silently score another.
+//
+// It also leaves a record of the run under evalRuns/ (issue #26). Note the
+// error it returns may arrive AFTER a successful eval printed its report - a
+// failed recording is worth a non-zero exit, but not worth suppressing numbers
+// that have already been paid for.
 func runEval(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG, 3=RAG per-story)")
@@ -130,8 +148,7 @@ func runEval(args []string) error {
 	if err != nil {
 		return fmt.Errorf("eval: %w", err)
 	}
-	evalHarness.RunEval(arm)
-	return nil
+	return evalHarness.RunEval(arm)
 }
 
 // runClassify is the scheduled path: fetch the HN front page, classify under the

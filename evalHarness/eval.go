@@ -60,6 +60,22 @@ type Metrics struct {
 	FalseNegatives []LabelledStory // labelled relevant but we skipped    -> blind spots
 }
 
+// predictedPositiveSet turns the classifier's returned IDs into a set for O(1)
+// lookup while walking the dataset.
+//
+// It is shared rather than inlined because two things ask "did we flag this
+// story?": the metrics (Evaluate) and the per-story CSV. If each built its own
+// notion of the predicted set, the CSV could disagree with the confusion matrix
+// it sits next to - and the CSV exists precisely to be trusted as the per-item
+// breakdown of those counts.
+func predictedPositiveSet(predictedPositiveIDs []int) map[int]bool {
+	predicted := make(map[int]bool, len(predictedPositiveIDs))
+	for _, id := range predictedPositiveIDs {
+		predicted[id] = true
+	}
+	return predicted
+}
+
 // Evaluate is the heart of the eval and is intentionally PURE: it takes the
 // classifier's predicted-relevant IDs plus the labelled dataset and returns the
 // metrics. No network, no I/O -> trivially unit-testable with hand-built numbers
@@ -68,11 +84,7 @@ type Metrics struct {
 // A story counts as "predicted positive" if and only if its StoryID appears in
 // predictedPositiveIDs; every other story in the dataset is "predicted negative".
 func Evaluate(predictedPositiveIDs []int, dataset []LabelledStory) Metrics {
-	// Put the predicted IDs in a set for O(1) lookup while we walk the dataset.
-	predicted := make(map[int]bool, len(predictedPositiveIDs))
-	for _, id := range predictedPositiveIDs {
-		predicted[id] = true
-	}
+	predicted := predictedPositiveSet(predictedPositiveIDs)
 
 	var m Metrics
 	for _, s := range dataset {
