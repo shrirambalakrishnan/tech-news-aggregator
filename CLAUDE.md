@@ -16,6 +16,7 @@ go run . 3                      # run under arm 3 (RAG, per-story retrieval; nee
 go run . prebuild               # extract GitHub interest profile -> profile/user_context.json (occasional)
 go run . embed                  # chunk+embed profile/corpus -> profile/corpus_index.json (requires VOYAGE_API_KEY; ~20 min on Voyage free tier)
 go run . eval 0                 # eval under a specific arm (arm is REQUIRED for eval; 0|1|2|3); writes a run record to evalRuns/
+go run . eval-report            # read evalRuns/ back: every run, then per-configuration mean ± spread (free; no API call, writes nothing)
 go run . calibrate-floor        # measure rag.RETRIEVAL_SIMILARITY_FLOOR from the labelled set (free; requires VOYAGE_API_KEY)
 go test ./...                   # run all tests
 go test ./hackernews_classifier/ -run TestClassifyTechNewsStory   # single test, single package
@@ -155,7 +156,22 @@ Every `go run . eval <arm>` now writes two files, both stemmed `<UTC timestamp>-
 
 > **Known limitations, both deliberate.** (1) **`git_sha` is HEAD, not the working tree** — an uncommitted edit to a tuning constant is invisible, so a record can name a commit whose code is not what ran. Commit tuning changes before measuring them. (2) **Arm 1's `profile/user_context.json` is NOT hashed.** It is equally git-ignored, equally regenerable, and equally decides arm 1's numbers, so arm 1 records pin the code and model but not the profile actually used — an asymmetry with arms 2/3, left as a follow-up rather than an oversight. (3) `rag.BuildCorpusIndex` fails soft (logs, returns nothing), so `main.runEmbed` cannot tell a successful build from a failed one and will archive whichever index is on disk. Truthful about what the RAG arms would read *now*, but not evidence this run produced it; making `BuildCorpusIndex` return an error would close the gap and was deliberately not bundled in.
 
-**Deferred:** an aggregator over the records (issue #26 names it explicitly as a separate issue). The records are the substrate for it, not the reporting layer.
+## The eval-run aggregator (issue #34)
+
+`go run . eval-report` reads `evalRuns/*.json` back and prints two tables. **Free — no Claude call, no Voyage call, and it writes nothing.** It is a view over the records, never an input to them, which is what keeps it unable to change what a future eval means.
+
+Organized one file per stage, mirroring `rag`: `evalHarness/report_load.go` (INPUT — `loadRunRecords`), `report_group.go` (TRANSFORM — pure statistics), `report.go` (OUTPUT + the `RunEvalReport` entrypoint, streams injected as `calibrateFloor` does).
+
+- **Output 1 — one row per run**, sorted by `run_id` (lexically chronological by construction): `run_id, arm, git_sha(7), dataset_hash(12), corpus_index_hash(12), model, TP, FP, TN, FN, precision, recall`. Hashes are abbreviated; **the model is not** — it is a grouping key, and truncating it could make two different models look like one configuration. An absent `corpus_index_hash` (arms 0/1) renders `—`, never blank or `0`.
+- **Output 2 — one row per configuration**, grouped by `(arm, git_sha, model, dataset_hash, corpus_index_hash)` and sorted by `n` desc then every key field asc. The tiebreak is load-bearing: Go randomises map iteration, so without a total ordering the report is nondeterministic and untestable. Counts are means; precision/recall carry mean and **sample** stddev (n−1 — the runs are draws from a non-deterministic process, not a complete population).
+- **`±` prints only when measured.** `aggregate.StdDevDefined` is what makes "not measured" representable; at n=1 `formatAggregate` prints the bare mean. `± 0.0000` would read as perfect reproducibility, the opposite of what one run says — and n=1 is the common case (3 of the 4 records on disk).
+- **Precision/recall are averaged PER RUN**, never recomputed from summed counts. Its test fixture had to be *constructed*: recall's denominator (`TP+FN`) is the dataset's positive count and so is constant across runs on one dataset, and the real records happen to have flagged the same number of stories — so a pooled implementation passes against live data. Only precision's denominator varies.
+- **The glob is non-recursive**, deliberately: `evalRuns/datasets/` and `evalRuns/corpus_index/` hold `<sha256>.json` artifacts, and a recursive walk would try to parse a 4.4 MB corpus index as a run record.
+- **Unusable records are skipped, not fatal** — a deliberate exception to issue #11's no-fail-soft rule, since one broken file should not deny a report over the other twenty. Mitigated by printing the skip *count* into the table header (`=== Eval runs (3, 1 skipped) ===`), because `n` is the number the variance table hangs on. A JSON object with no `run_id` is skipped too: `encoding/json` ignores unknown fields, so any JSON decodes into a zero `RunRecord` and would appear as a fabricated arm-0 run scoring nothing.
+
+**Non-goals, all confirmed:** no README auto-update, no reading the per-run CSVs, no cross-configuration comparison or ranking, and the aggregator writes no files.
+
+**Limitations inherited from the record and undetectable here:** `git_sha` is HEAD, not the working tree, so two runs sharing a sha may have run different uncommitted code and group as one configuration; and arm 1's `profile/user_context.json` is not hashed, so arm-1 rows group on a key omitting an input that decides their numbers. Both are printed as a footnote under Output 2.
 
 ## Approach 3 — RAG experiment (built + evaluated)
 

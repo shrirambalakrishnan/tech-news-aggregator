@@ -71,8 +71,24 @@ func renderEvalReport(out, warnOut io.Writer) error {
 	fmt.Fprintf(out, "\n%s\n\n", runsHeader(len(records), len(skipped)))
 	fmt.Fprint(out, formatRunsTable(records))
 
+	groups := groupRuns(records)
+	fmt.Fprintf(out, "\n%s\n\n", groupsHeader(len(groups)))
+	fmt.Fprint(out, formatGroupsTable(groups))
+	fmt.Fprint(out, "\n"+GROUPS_TABLE_FOOTNOTE)
+
 	return nil
 }
+
+// GROUPS_TABLE_FOOTNOTE states what the second table cannot show, next to the
+// table rather than in a document nobody has open. Both caveats are inherited
+// from issue #26's run record and cannot be detected here: the aggregator can
+// only group by what was recorded.
+const GROUPS_TABLE_FOOTNOTE = "" +
+	"n=1 groups show no ± — one run measures no spread.\n" +
+	"git_sha is HEAD, not the working tree: two runs sharing a sha may have run\n" +
+	"different uncommitted code, and would be grouped here as one configuration.\n" +
+	"Arm 1's profile/user_context.json is not hashed, so arm-1 rows group on a key\n" +
+	"that omits an input deciding their numbers.\n"
 
 // runsHeader names how many runs the table covers AND how many files could not
 // be read. The skip count belongs in the header rather than only on stderr: a
@@ -109,6 +125,65 @@ func formatRunsTable(records []RunRecord) string {
 
 	w.Flush()
 	return b.String()
+}
+
+// groupsHeader names the grouping tuple in full, so the table is self-describing
+// - a reader must be able to tell what "the same configuration" meant here
+// without going to the source, since that definition is the whole basis for
+// calling two runs repeats of one experiment.
+func groupsHeader(groups int) string {
+	noun := "groups"
+	if groups == 1 {
+		noun = "group"
+	}
+	return fmt.Sprintf(
+		"=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — %d %s ===",
+		groups, noun,
+	)
+}
+
+// formatGroupsTable renders one row per configuration: how many runs measured it,
+// their mean confusion matrix, and their precision/recall with spread.
+//
+// Mean counts print to one decimal - they are averages of integers, and a mean
+// of 22.5 TP must not round to 22 and read as a count that was observed. The
+// rates print to four, matching Metrics.Report(), so a row here is directly
+// comparable to the report of the run it came from.
+func formatGroupsTable(groups []runGroup) string {
+	var b strings.Builder
+	w := newTableWriter(&b)
+
+	fmt.Fprintln(w, "arm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\tn\tTP\tFP\tTN\tFN\tprecision\trecall")
+	for _, g := range groups {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\t%s\n",
+			g.Key.Arm,
+			shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN),
+			shortHash(g.Key.DatasetHash, CONTENT_HASH_SHORT_LEN),
+			shortHash(g.Key.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
+			g.Key.Model,
+			g.N,
+			g.MeanTP, g.MeanFP, g.MeanTN, g.MeanFN,
+			formatAggregate(g.Precision),
+			formatAggregate(g.Recall),
+		)
+	}
+
+	w.Flush()
+	return b.String()
+}
+
+// formatAggregate renders "0.2184 ± 0.0206" when the spread was measured and a
+// bare "0.2184" when it was not.
+//
+// ⚠️ It must never print "± 0.0000". At n=1 there is no spread to report, and a
+// zero there reads as perfect reproducibility - the opposite of the truth, which
+// is that nothing is known about it. One function for both metric columns, so the
+// rule holds by construction rather than by two call sites remembering it.
+func formatAggregate(a aggregate) string {
+	if !a.StdDevDefined {
+		return fmt.Sprintf("%.4f", a.Mean)
+	}
+	return fmt.Sprintf("%.4f ± %.4f", a.Mean, a.StdDev)
 }
 
 // newTableWriter is the one place the table geometry is set, so both tables line

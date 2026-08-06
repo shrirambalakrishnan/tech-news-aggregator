@@ -124,6 +124,90 @@ func TestRenderEvalReportWithNoRecords(t *testing.T) {
 	}
 }
 
+func TestFormatAggregateShowsSpreadOnlyWhenMeasured(t *testing.T) {
+	measured := formatAggregate(aggregate{Mean: 0.2184, StdDev: 0.0206, StdDevDefined: true})
+	if measured != "0.2184 ± 0.0206" {
+		t.Errorf("formatAggregate(n>1) = %q, want %q", measured, "0.2184 ± 0.0206")
+	}
+
+	// The rule this whole aggregate type exists for: at n=1 nothing is known
+	// about the spread, and "± 0.0000" would claim perfect reproducibility.
+	single := formatAggregate(aggregate{Mean: 0.1269})
+	if single != "0.1269" {
+		t.Errorf("formatAggregate(n=1) = %q, want %q", single, "0.1269")
+	}
+	if strings.Contains(single, "±") {
+		t.Errorf("n=1 rendered a ±: %q", single)
+	}
+}
+
+func TestFormatGroupsTableRowsCarryNAndSpread(t *testing.T) {
+	repeated := groupableRecord("20260806T084423Z-arm-2")
+	repeated.Metrics = RunMetrics{TP: 24, FP: 79, TN: 227, FN: 11, Precision: 0.2330, Recall: 0.6857}
+	second := groupableRecord("20260806T085514Z-arm-2")
+	second.Metrics = RunMetrics{TP: 21, FP: 82, TN: 224, FN: 14, Precision: 0.2039, Recall: 0.6000}
+	single := groupableRecord("20260806T090351Z-arm-0")
+	single.Arm, single.CorpusIndexHash = 0, ""
+	single.Metrics = RunMetrics{TP: 17, FP: 117, TN: 189, FN: 18, Precision: 0.1269, Recall: 0.4857}
+
+	table := formatGroupsTable(groupRuns([]RunRecord{repeated, second, single}))
+	lines := strings.Split(strings.TrimRight(table, "\n"), "\n")
+	if len(lines) != 3 { // header + two groups
+		t.Fatalf("table has %d lines, want 3:\n%s", len(lines), table)
+	}
+
+	// n=2 first (sorted by n descending), with mean counts to one decimal and a
+	// measured spread on both rates.
+	grouped := lines[1]
+	for _, want := range []string{"22.5", "80.5", "225.5", "12.5", "0.2185 ± 0.0206"} {
+		if !strings.Contains(grouped, want) {
+			t.Errorf("n=2 row missing %q:\n%s", want, grouped)
+		}
+	}
+
+	// n=1 second, with no ± anywhere on the row.
+	lone := lines[2]
+	if !strings.Contains(lone, "0.1269") || !strings.Contains(lone, "0.4857") {
+		t.Errorf("n=1 row missing its rates:\n%s", lone)
+	}
+	if strings.Contains(lone, "±") {
+		t.Errorf("n=1 row printed a ±, which reads as measured certainty:\n%s", lone)
+	}
+	if !strings.Contains(lone, ABSENT_VALUE) {
+		t.Errorf("arm-0 group should mark its absent corpus index:\n%s", lone)
+	}
+}
+
+// Both sections, in order, from one call - the shape an operator actually sees.
+func TestRenderEvalReportPrintsBothSections(t *testing.T) {
+	first := groupableRecord("20260806T084423Z-arm-2")
+	second := groupableRecord("20260806T085514Z-arm-2")
+	withStubbedRecords(t, []RunRecord{first, second}, nil)
+
+	out, _ := renderForTest(t)
+
+	runsAt := strings.Index(out, "=== Eval runs (2) ===")
+	groupsAt := strings.Index(out, "=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — 1 group ===")
+	if runsAt < 0 {
+		t.Fatalf("runs section missing:\n%s", out)
+	}
+	if groupsAt < 0 {
+		t.Fatalf("groups section missing:\n%s", out)
+	}
+	if groupsAt < runsAt {
+		t.Errorf("groups section printed before the runs section:\n%s", out)
+	}
+
+	// Every run appears once in the first table; the group appears once in the
+	// second.
+	if strings.Count(out, first.RunID) != 1 || strings.Count(out, second.RunID) != 1 {
+		t.Errorf("each run should appear exactly once:\n%s", out)
+	}
+	if !strings.Contains(out, "n=1 groups show no ±") {
+		t.Errorf("footnote missing from the report:\n%s", out)
+	}
+}
+
 func TestShortHash(t *testing.T) {
 	cases := []struct {
 		in   string
