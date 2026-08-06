@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/shrirambalakrishnan/tech-news/armcontext"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
@@ -30,24 +31,57 @@ var buildProfileForArm = armcontext.BuildProfile
 
 // RunEval is the `go run . eval <arm>` entrypoint: load the labelled data, run
 // the classifier over it in batches exactly as production would under the given
-// arm, score the predictions against the human labels, and print the report to
-// the console. It runs exactly one arm.
-func RunEval(arm hackernews_classifier.Arm) {
+// arm, score the predictions against the human labels, print the report to the
+// console, and record what the run used. It runs exactly one arm.
+//
+// It returns an error rather than calling log.Fatal so main keeps exactly one
+// exit point - which matters here because the report and the exit code are
+// decided separately: see the recording step below.
+func RunEval(arm hackernews_classifier.Arm) error {
+	runID := newRunID(arm)
+
 	dataset, err := loadLabelledData(LABELLED_DATA_FILE)
 	if err != nil {
-		log.Fatal("eval: failed to load labelled data: ", err)
+		return fmt.Errorf("eval: failed to load labelled data: %w", err)
 	}
 	log.Printf("eval: loaded %d labelled stories from %s", len(dataset), LABELLED_DATA_FILE)
 
+	// Everything above this line is free. Everything below spends money.
 	predictedIDs, err := classifyInBatches(arm, dataset)
 	if err != nil {
-		log.Fatal("eval: ", err)
+		return fmt.Errorf("eval: %w", err)
 	}
 
 	metrics := Evaluate(predictedIDs, dataset)
 
-	// Console-log the full report (every metric + the FP/FN title lists).
+	// Console-log the full report (every metric + the FP/FN title lists) BEFORE
+	// recording. An eval run costs real money and ~10 minutes, so a failure to
+	// write the record must never cost the operator the report they paid for -
+	// hence print first, then record, then return the recording error so the
+	// exit code still says something went wrong.
 	fmt.Print(metrics.Report())
+
+	return recordRun(runID, arm, metrics)
+}
+
+// recordRun writes the run's descriptive artifacts. Separated from RunEval so
+// the ordering rule above ("report first, then record") is visible at the call
+// site rather than buried in a tail of writes.
+//
+// A classification failure never reaches here: there are no metrics to record,
+// and a record of a run that produced no numbers would be misleading rather
+// than incomplete.
+func recordRun(runID string, arm hackernews_classifier.Arm, metrics Metrics) error {
+	record, err := buildRunRecord(runID, arm, metrics)
+	if err != nil {
+		return fmt.Errorf("eval: failed to build run record for %s: %w", runID, err)
+	}
+	if err := writeRunRecord(record); err != nil {
+		return fmt.Errorf("eval: %w", err)
+	}
+
+	log.Printf("eval: wrote run record %s", filepath.Join(EVAL_RUNS_DIR, runID+".json"))
+	return nil
 }
 
 // loadLabelledData reads and parses the JSON array of labelled stories.

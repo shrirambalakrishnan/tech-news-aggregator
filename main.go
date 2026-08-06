@@ -122,6 +122,11 @@ func runCalibrateFloor() error {
 // precision/recall plus the misclassified titles. Offline quality check, not
 // part of the scheduled run. The arm is REQUIRED (no default) so an eval meant
 // for one arm can't silently score another.
+//
+// It also leaves a record of the run under evalRuns/ (issue #26). Note the
+// error it returns may arrive AFTER a successful eval printed its report - a
+// failed recording is worth a non-zero exit, but not worth suppressing numbers
+// that have already been paid for.
 func runEval(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG, 3=RAG per-story)")
@@ -130,8 +135,7 @@ func runEval(args []string) error {
 	if err != nil {
 		return fmt.Errorf("eval: %w", err)
 	}
-	evalHarness.RunEval(arm)
-	return nil
+	return evalHarness.RunEval(arm)
 }
 
 // runClassify is the scheduled path: fetch the HN front page, classify under the

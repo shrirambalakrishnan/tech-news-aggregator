@@ -27,3 +27,8 @@ profile/scores*.csv
 
 # eval run transcripts, kept locally for reading back a scored run
 eval-run-logs
+
+# per-run eval records + the dataset/index snapshots they reference.
+# Local run history: regenerable only by paying for another run, so it is
+# neither source of truth nor something to review in a diff.
+evalRuns
