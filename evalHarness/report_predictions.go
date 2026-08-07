@@ -4,9 +4,11 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"strconv"
+
+	"github.com/jszwec/csvutil"
 )
 
 // This file is the second INPUT stage of the eval-run aggregator (issue #37):
@@ -29,10 +31,20 @@ import (
 // bucketing needs. The title is deliberately dropped - issue #37 prints counts
 // only, and carrying titles would invite a "which stories" list the ticket
 // explicitly parked.
+//
+// The tags address columns BY NAME, which is not fussiness: `label` and
+// `predicted` are both 0/1 values sitting next to each other, so a positional
+// reader that got them the wrong way round would keep parsing happily and report
+// confident numbers computed from the wrong field. Every other way this can go
+// wrong is loud. Named columns also mean one the reader does not need - adding
+// objectID is the case already discussed - leaves it working.
+//
+// Predicted is a bool over a column holding "1"/"0" because csvutil decodes
+// bools with strconv.ParseBool, which accepts both.
 type storyVerdict struct {
-	StoryID   int
-	Label     int
-	Predicted bool
+	StoryID   int  `csv:"story_id"`
+	Label     int  `csv:"label"`
+	Predicted bool `csv:"predicted"`
 }
 
 // loadPredictions is the DI seam (the repo-wide function-variable convention),
@@ -58,57 +70,30 @@ func loadPredictionsCSV(dir, runID string) ([]storyVerdict, error) {
 	}
 	defer file.Close()
 
-	rows, err := csv.NewReader(file).ReadAll()
+	// NewDecoder consumes the header, so an empty file fails here rather than
+	// decoding as zero rows. Its EOF is restated: this error reaches the
+	// operator as a warning explaining a missing stability block, and a bare
+	// "EOF" does not say what to go and look at.
+	decoder, err := csvutil.NewDecoder(csv.NewReader(file))
+	if errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("predictions CSV %s is empty", path)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read predictions CSV %s: %w", path, err)
 	}
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("predictions CSV %s is empty", path)
-	}
 
-	columns := map[string]int{}
-	for i, name := range rows[0] {
-		columns[name] = i
-	}
+	// ⚠️ Load-bearing. Without it a header missing `story_id` decodes every row
+	// to the zero value, and 341 stories silently collapse into one - numbers
+	// that look plausible and are wrong. Failing loudly is the whole reason this
+	// reader validates anything at all.
+	decoder.DisallowMissingColumns = true
 
-	verdicts := make([]storyVerdict, 0, len(rows)-1)
-	for i, row := range rows[1:] {
-		storyID, idErr := intColumn(row, columns, "story_id")
-		label, labelErr := intColumn(row, columns, "label")
-		predicted, predictedErr := intColumn(row, columns, "predicted")
-
-		if err := errors.Join(idErr, labelErr, predictedErr); err != nil {
-			// +2: past the header, and back to 1-based line numbers.
-			return nil, fmt.Errorf("predictions CSV %s line %d: %w", path, i+2, err)
-		}
-		verdicts = append(verdicts, storyVerdict{StoryID: storyID, Label: label, Predicted: predicted == 1})
+	var verdicts []storyVerdict
+	// io.EOF here means a header and no rows, which is an empty run rather than
+	// a broken file.
+	if err := decoder.Decode(&verdicts); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("predictions CSV %s: %w", path, err)
 	}
 
 	return verdicts, nil
-}
-
-// intColumn reads one named column as an integer, erroring by name when the
-// column is absent.
-//
-// BY NAME rather than by position, which is not fussiness: `label` and
-// `predicted` are both 0/1 ints sitting next to each other, so a positional
-// reader that got them the wrong way round would keep parsing happily and report
-// confident numbers computed from the wrong field. Every other way this can go
-// wrong is loud. It also means a column the reader does not need - adding
-// objectID is the case already discussed - leaves it working.
-//
-// Indexing is safe without a length check: csv.Reader takes FieldsPerRecord from
-// the header and rejects any row that doesn't match, so every row is exactly as
-// long as the header the indexes came from.
-func intColumn(row []string, columns map[string]int, name string) (int, error) {
-	index, found := columns[name]
-	if !found {
-		return 0, fmt.Errorf("missing column %q", name)
-	}
-
-	value, err := strconv.Atoi(row[index])
-	if err != nil {
-		return 0, fmt.Errorf("column %q is not an integer: %w", name, err)
-	}
-	return value, nil
 }
