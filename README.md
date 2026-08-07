@@ -143,6 +143,9 @@ go run . eval 3         # eval under arm 3 — same free-tier throttling as arm 
 # Approach 5 — reading notes in the corpus (arm 2)
 go run . embed          # picks up notes-*.md with no other wiring
 go run . eval 2         # arm 2 is unchanged; only the corpus behind it widened
+
+# Reading the eval history back (free — no API call, writes nothing)
+go run . eval-report    # every recorded run, then per-configuration mean ± spread
 ```
 
 Every `eval` also writes a record of what it used to `evalRuns/` — see
@@ -207,6 +210,61 @@ Two limitations worth knowing before trusting a record:
 
 The whole directory is git-ignored: it is local run history, regenerable only by
 paying for another run.
+
+### Reading the records back — `go run . eval-report`
+
+The records answer "what did this run use". `eval-report` answers the question
+they were written for: **how much does a configuration's score move between
+runs?** A single eval is a point estimate — the classifier is non-deterministic
+— so a gap between two arms is only a result once it clears the run-to-run
+spread. Until now that spread was computed by hand.
+
+The command reads `evalRuns/*.json` and prints two tables. It costs **$0.00**,
+makes no API call, and **writes nothing**.
+
+```
+=== Eval runs (4) ===
+
+run_id                  arm  git_sha  dataset_hash  corpus_index  model                      TP  FP   TN   FN  precision  recall
+20260806T084423Z-arm-2  2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  24  79   227  11  0.2330     0.6857
+20260806T085514Z-arm-2  2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  21  82   224  14  0.2039     0.6000
+20260806T090351Z-arm-0  0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  17  117  189  18  0.1269     0.4857
+20260806T090525Z-arm-3  3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  20  70   236  15  0.2222     0.5714
+
+=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — 3 groups ===
+
+arm  git_sha  dataset_hash  corpus_index  model                      n  TP    FP     TN     FN    precision        recall
+2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  2  22.5  80.5   225.5  12.5  0.2184 ± 0.0206  0.6429 ± 0.0606
+0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  1  17.0  117.0  189.0  18.0  0.1269           0.4857
+3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  1  20.0  70.0   236.0  15.0  0.2222           0.5714
+```
+
+- **Table 1** — one row per run, sorted by `run_id` (chronological by
+  construction). `git_sha` is abbreviated to 7 so it pastes into `git show`; the
+  content hashes to 12, enough to name one archived file. The model is printed in
+  full — it is a grouping key, and truncating it could make two different models
+  look like one.
+- **Table 2** — one row per *configuration*: runs are repeats of the same
+  experiment only if they shared all five of arm, commit, model, dataset and
+  corpus index. Counts are means; precision and recall carry the **sample**
+  standard deviation (n−1 denominator — the runs are draws from a
+  non-deterministic process, not a complete population).
+- **`±` appears only when it was measured.** At n=1 there is no spread, so no `±`
+  is printed. `± 0.0000` would read as perfect reproducibility, which is the
+  opposite of what one run tells you — and n=1 is the common case.
+- **Precision and recall are averaged per run**, never recomputed from the summed
+  counts: pooling would cancel the per-run variation inside the fraction and
+  average away exactly what the table measures.
+- An unreadable record file is **skipped with a warning on stderr** and the skip
+  count appears in the header (`=== Eval runs (3, 1 skipped) ===`), so a short `n`
+  is visible in the report rather than only in a log line.
+
+Two caveats it inherits from the records and cannot detect: `git_sha` is HEAD
+rather than the working tree, so two runs sharing a sha may have run different
+uncommitted code and would group as one configuration; and arm 1's
+`profile/user_context.json` is not hashed, so arm-1 rows group on a key missing an
+input that decides their numbers. A suspiciously wide `±` should suspect the first
+of these before it suspects the model.
 
 ## Eval - Execution results
 

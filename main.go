@@ -14,6 +14,11 @@ import (
 	"github.com/shrirambalakrishnan/tech-news/rag"
 )
 
+// DI seam (the repo-wide function-variable convention): lets the dispatch test
+// assert that `eval-report` reaches the aggregator without the test rendering the
+// real evalRuns/ directory to the console.
+var runEvalReportCommand = evalHarness.RunEvalReport
+
 // parseArm converts a CLI argument into an Arm. Only the valid arms (0-3) are
 // accepted; anything else errors so a typo can't silently fall through to a
 // default flow.
@@ -45,6 +50,7 @@ func main() {
 //
 //	go run . [arm]      -> classify (arm optional, defaults to 0)
 //	go run . eval <arm> -> eval     (arm REQUIRED)
+//	go run . eval-report -> summarise the eval runs recorded so far
 //	go run . prebuild   -> prebuild
 //	go run . embed      -> build the corpus index the RAG arms retrieve from
 //	go run . calibrate-floor -> pick rag.RETRIEVAL_SIMILARITY_FLOOR from measured scores
@@ -65,6 +71,8 @@ func run(args []string) error {
 		return runCalibrateFloor()
 	case "eval":
 		return runEval(args[1:])
+	case "eval-report":
+		return runEvalReport(args[1:])
 	default:
 		// Not a known subcommand, so it's a normal run and args[0] - if present
 		// at all - is the arm.
@@ -149,6 +157,28 @@ func runEval(args []string) error {
 		return fmt.Errorf("eval: %w", err)
 	}
 	return evalHarness.RunEval(arm)
+}
+
+// runEvalReport summarises every eval run recorded under evalRuns/ so far: one
+// table listing each run, then one grouping the runs that shared an arm, a
+// commit, a model and the same data, with the mean and spread of their metrics.
+//
+// It exists because a single eval run is a point estimate. The classifier is
+// non-deterministic (claudeapi sends no temperature, so the API default applies),
+// so the question "is arm X better than arm Y" is really "is the gap bigger than
+// the run-to-run spread" - and answering it meant opening record files by hand
+// and reaching for a calculator.
+//
+// Costs nothing and WRITES nothing: no Claude call, no Voyage call, no file
+// touched. It is a view over the records, never an input to them.
+func runEvalReport(args []string) error {
+	// Strict about extra arguments, like parseArm: a mistyped flag must fail
+	// loudly rather than be silently ignored, or the operator will believe they
+	// filtered a report that was in fact unfiltered.
+	if len(args) > 0 {
+		return fmt.Errorf("eval-report takes no arguments, got %q", args[0])
+	}
+	return runEvalReportCommand()
 }
 
 // runClassify is the scheduled path: fetch the HN front page, classify under the
