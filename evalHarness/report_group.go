@@ -60,8 +60,14 @@ type aggregate struct {
 // there to describe the configuration's typical behaviour; precision and recall
 // are the numbers decisions get made on, so they are the ones whose stability has
 // to be visible.
+//
+// RunIDs names the members. The means say what the configuration scored; they
+// cannot say WHICH runs produced them, and the per-story stability section
+// (issue #37) has to open each member's predictions CSV by run ID. N is derived
+// from this slice rather than counted separately, so the two cannot drift.
 type runGroup struct {
 	Key                            runGroupKey
+	RunIDs                         []string
 	N                              int
 	MeanTP, MeanFP, MeanTN, MeanFN float64
 	Precision, Recall              aggregate
@@ -85,6 +91,7 @@ type runGroup struct {
 // precision's denominator, how many stories the run flagged, actually varies.)
 func groupRuns(records []RunRecord) []runGroup {
 	type accumulator struct {
+		runIDs              []string
 		tp, fp, tn, fn      []float64
 		precisions, recalls []float64
 	}
@@ -107,6 +114,7 @@ func groupRuns(records []RunRecord) []runGroup {
 			order = append(order, key)
 		}
 
+		acc.runIDs = append(acc.runIDs, r.RunID)
 		acc.tp = append(acc.tp, float64(r.Metrics.TP))
 		acc.fp = append(acc.fp, float64(r.Metrics.FP))
 		acc.tn = append(acc.tn, float64(r.Metrics.TN))
@@ -118,9 +126,18 @@ func groupRuns(records []RunRecord) []runGroup {
 	groups := make([]runGroup, 0, len(order))
 	for _, key := range order {
 		acc := byKey[key]
+
+		// Sorted for the same reason sortGroups exists: a caller must not be
+		// able to change the report by handing the records over in a different
+		// order. loadRunRecords already sorts, so this is normally a no-op -
+		// but groupRuns is also called directly, and downstream output keyed on
+		// this slice has to be reproducible.
+		sort.Strings(acc.runIDs)
+
 		groups = append(groups, runGroup{
 			Key:       key,
-			N:         len(acc.precisions),
+			RunIDs:    acc.runIDs,
+			N:         len(acc.runIDs),
 			MeanTP:    mean(acc.tp),
 			MeanFP:    mean(acc.fp),
 			MeanTN:    mean(acc.tn),
