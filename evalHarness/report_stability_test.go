@@ -197,3 +197,18 @@ func TestDedupeStoriesIsPerRun(t *testing.T) {
 		t.Fatalf("got %+v, want the story kept once in each of the two runs", deduped)
 	}
 }
+
+// A story no run flagged has no key in the flag counts at all - it is absent,
+// not zero - so it can only reach the "never" bucket via the enumeration.
+// Without that, the row totals silently come up short.
+func TestBucketStabilityCountsStoriesNoRunFlagged(t *testing.T) {
+	labels := map[int]int{1: 1, 2: 1, 3: 0}
+
+	table := bucketStability([][]storyVerdict{
+		verdicts(labels), // neither run flagged anything
+		verdicts(labels),
+	})
+
+	assertBuckets(t, "relevant", table.Relevant, 2, 0, 0)
+	assertBuckets(t, "irrelevant", table.Irrelevant, 1, 0, 0)
+}

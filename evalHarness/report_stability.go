@@ -70,11 +70,11 @@ func bucketStability(runs [][]storyVerdict) stabilityTable {
 	// story per run and none of them has to restate the rule.
 	deduped := dedupeStories(runs)
 
-	labels := storyLabels(deduped)
+	scored := scoredStories(deduped)
 	timesFlagged := countRunsFlagging(deduped)
 
 	table := stabilityTable{N: len(runs)}
-	for storyID, label := range labels {
+	for storyID, label := range scored {
 		if label == 1 {
 			table.Relevant.add(timesFlagged[storyID], len(runs))
 		} else {
@@ -98,22 +98,28 @@ func (b *stabilityBuckets) add(timesFlagged, runs int) {
 	}
 }
 
-// storyLabels is every story the group scored, with its class.
+// scoredStories is the set of every story the group scored, carrying each one's
+// class along as the value.
 //
-// It is the UNIVERSE, not merely a lookup - which is why the counts alone are
-// not enough to build the table. countRunsFlagging only ever knows about stories
-// somebody flagged, so the "never" bucket - stories nobody flagged - would be
-// missing from it entirely and those stories would vanish silently. Every run in
-// a group shares a dataset_hash by construction of the group key, so they cannot
-// disagree about a story's label.
-func storyLabels(runs [][]storyVerdict) map[int]int {
-	labels := map[int]int{}
+// ENUMERATION is the point, not lookup - which is why the flag counts alone
+// cannot build the table. countRunsFlagging knows only about stories somebody
+// flagged, so a story no run flagged has no key there at all: it is absent, not
+// zero. "Never" is a bucket this table prints, so those stories have to be
+// enumerated from somewhere else or they vanish and the row totals come up
+// short.
+//
+// The label write is idempotent, not a race: every run in a group shares a
+// dataset_hash by construction of the group key, so each run writes the same
+// label for the same story. The loop is a union over the runs, and the last
+// write agrees with the first.
+func scoredStories(runs [][]storyVerdict) map[int]int {
+	stories := map[int]int{}
 	for _, verdicts := range runs {
 		for _, v := range verdicts {
-			labels[v.StoryID] = v.Label
+			stories[v.StoryID] = v.Label
 		}
 	}
-	return labels
+	return stories
 }
 
 // countRunsFlagging counts, per story, how many runs flagged it. Takes deduped
