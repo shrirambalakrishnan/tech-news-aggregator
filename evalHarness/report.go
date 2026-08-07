@@ -76,7 +76,116 @@ func renderEvalReport(out, warnOut io.Writer) error {
 	fmt.Fprint(out, formatGroupsTable(groups))
 	fmt.Fprint(out, "\n"+GROUPS_TABLE_FOOTNOTE)
 
+	renderStabilitySections(out, warnOut, groups)
+
 	return nil
+}
+
+// STABILITY_MIN_RUNS is the smallest group the stability block is printed for.
+//
+// One run measures no stability at all: every story it flagged was flagged by
+// every run, so the "sometimes" column would be structurally zero and the block
+// would read as perfect consistency. Same rule, and the same failure it avoids,
+// as the n=1 no-± convention in report_group.go.
+const STABILITY_MIN_RUNS = 2
+
+// renderStabilitySections prints one per-story stability block per group with
+// enough runs to have something to say, in Output 2's own order - groupRuns
+// already imposes a total ordering, so reusing its slice makes this section
+// deterministic for free.
+//
+// ⚠️ A group whose CSVs cannot be read is SKIPPED with a warning, not fatal -
+// the same posture loadRunRecords takes toward an unreadable record, and for the
+// same reason: one missing file should not deny the operator the rest of a
+// report that is free to produce and already correct.
+func renderStabilitySections(out, warnOut io.Writer, groups []runGroup) {
+	for _, g := range groups {
+		if g.N < STABILITY_MIN_RUNS {
+			continue
+		}
+
+		table, err := stabilityForGroup(g)
+		if err != nil {
+			fmt.Fprintf(warnOut, "eval-report: no stability block for arm %d / %s: %v\n",
+				g.Key.Arm, shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN), err)
+			continue
+		}
+
+		fmt.Fprintf(out, "\n%s\n\n", stabilityHeader(g))
+		fmt.Fprint(out, formatStabilityTable(table))
+	}
+}
+
+// stabilityForGroup loads every member run's predictions and buckets them.
+//
+// All-or-nothing per group: a partial block computed from some of the runs would
+// carry a header saying n=3 over counts measured across 2, which is worse than
+// no block at all.
+func stabilityForGroup(g runGroup) (stabilityTable, error) {
+	runs := make([][]storyVerdict, 0, len(g.RunIDs))
+	for _, runID := range g.RunIDs {
+		verdicts, err := loadPredictions(EVAL_RUNS_DIR, runID)
+		if err != nil {
+			return stabilityTable{}, err
+		}
+		runs = append(runs, verdicts)
+	}
+	return bucketStability(runs), nil
+}
+
+// stabilityHeader names the configuration in full, over two lines so it fits a
+// terminal. The model is NOT abbreviated, for the same reason it is not in the
+// groups table: it is a grouping key, and truncating it could make two different
+// models look like one configuration.
+func stabilityHeader(g runGroup) string {
+	return fmt.Sprintf(
+		"=== Per-story stability — arm %d, %s, dataset %s,\n     index %s, %s (n=%d runs) ===",
+		g.Key.Arm,
+		shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN),
+		shortHash(g.Key.DatasetHash, CONTENT_HASH_SHORT_LEN),
+		shortHash(g.Key.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
+		g.Key.Model,
+		g.N,
+	)
+}
+
+// formatStabilityTable renders the two rows and three columns, and nothing else.
+// No title lists and no combining-rule scores: issue #37 parked both, and the
+// value of this block is that six numbers answer the question.
+//
+// Each row label carries its own total, so a reader can see at a glance what the
+// three counts are a share of without adding them up.
+func formatStabilityTable(table stabilityTable) string {
+	var b strings.Builder
+	w := newTableWriter(&b)
+
+	fmt.Fprintln(w, "\tnever\tsometimes\talways")
+	fmt.Fprintf(w, "\t%s\t%s\t%s\n",
+		runCountLabel(0, 0, table.N),
+		runCountLabel(1, table.N-1, table.N),
+		runCountLabel(table.N, table.N, table.N),
+	)
+	fmt.Fprintf(w, "relevant (%d)\t%d\t%d\t%d\n",
+		table.Relevant.Total(), table.Relevant.Never, table.Relevant.Sometimes, table.Relevant.Always)
+	fmt.Fprintf(w, "irrelevant (%d)\t%d\t%d\t%d\n",
+		table.Irrelevant.Total(), table.Irrelevant.Never, table.Irrelevant.Sometimes, table.Irrelevant.Always)
+
+	w.Flush()
+	return b.String()
+}
+
+// runCountLabel states a column's range of run counts: "(0 of 2)", "(1 of 2)",
+// "(1-2 of 3)".
+//
+// The counts are spelled out rather than left implicit because "sometimes" is
+// a far weaker claim at n=2, where it can only mean 1 of 2, than at n=7. A
+// reader must be able to see which they are looking at without going to the
+// source.
+func runCountLabel(low, high, n int) string {
+	if low == high {
+		return fmt.Sprintf("(%d of %d)", low, n)
+	}
+	return fmt.Sprintf("(%d-%d of %d)", low, high, n)
 }
 
 // GROUPS_TABLE_FOOTNOTE states what the second table cannot show, next to the

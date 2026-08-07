@@ -145,7 +145,7 @@ go run . embed          # picks up notes-*.md with no other wiring
 go run . eval 2         # arm 2 is unchanged; only the corpus behind it widened
 
 # Reading the eval history back (free — no API call, writes nothing)
-go run . eval-report    # every recorded run, then per-configuration mean ± spread
+go run . eval-report    # every run, per-configuration mean ± spread, then per-story stability
 ```
 
 Every `eval` also writes a record of what it used to `evalRuns/` — see
@@ -219,7 +219,7 @@ runs?** A single eval is a point estimate — the classifier is non-deterministi
 — so a gap between two arms is only a result once it clears the run-to-run
 spread. Until now that spread was computed by hand.
 
-The command reads `evalRuns/*.json` and prints two tables. It costs **$0.00**,
+The command reads `evalRuns/` and prints three sections. It costs **$0.00**,
 makes no API call, and **writes nothing**.
 
 ```
@@ -237,6 +237,14 @@ arm  git_sha  dataset_hash  corpus_index  model                      n  TP    FP
 2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  2  22.5  80.5   225.5  12.5  0.2184 ± 0.0206  0.6429 ± 0.0606
 0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  1  17.0  117.0  189.0  18.0  0.1269           0.4857
 3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  1  20.0  70.0   236.0  15.0  0.2222           0.5714
+
+=== Per-story stability — arm 2, 1b4a0be, dataset a59941fa34f7,
+     index 3daf2eee4e65, claude-haiku-4-5-20251001 (n=2 runs) ===
+
+                  never     sometimes  always
+                  (0 of 2)  (1 of 2)   (2 of 2)
+relevant (35)     11        3          21
+irrelevant (296)  211       11         74
 ```
 
 - **Table 1** — one row per run, sorted by `run_id` (chronological by
@@ -258,6 +266,22 @@ arm  git_sha  dataset_hash  corpus_index  model                      n  TP    FP
 - An unreadable record file is **skipped with a warning on stderr** and the skip
   count appears in the header (`=== Eval runs (3, 1 skipped) ===`), so a short `n`
   is visible in the report rather than only in a log line.
+- **Table 3 — per-story stability**, one block per configuration with 2 or more
+  runs. Tables 1 and 2 report counts, and counts are anonymous: `24 TP` is 24
+  tally marks, not 24 named stories, so a mean of 22.5 across two runs cannot say
+  whether it was the *same* stories both times. Reading each run's predictions CSV
+  answers it: a story flagged by every run, by some, or by none. Above, arm 2
+  catches 21 of the 35 relevant stories in both runs, flips on 3, and misses 11 in
+  both — which splits the lump mean FN into work that needs retrieval, prompt or
+  corpus changes (the 11, which re-running will not fix) and work a sampling
+  change might convert (the 3). The irrelevant row answers the same question for
+  false alarms, free, since it is the same computation.
+- The stability rows count **331 distinct `story_id`s, not the 341 dataset rows** —
+  10 ids appear twice, all irrelevant, which is why that row reads 296. All 35
+  relevant stories are distinct, so nothing on the relevant side is affected.
+- Groups with **one run print no block**, for the same reason they print no `±`.
+  And at n=2 the block is thin by nature: "sometimes" can only mean 1 of 2, and
+  "never" also absorbs a story that was merely unlucky twice.
 
 Two caveats it inherits from the records and cannot detect: `git_sha` is HEAD
 rather than the working tree, so two runs sharing a sha may have run different

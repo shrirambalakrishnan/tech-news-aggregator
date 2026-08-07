@@ -9,12 +9,45 @@ import (
 
 // withStubbedRecords swaps the loader seam so the rendering tests never touch
 // disk, and restores it afterwards.
+//
+// It stubs the predictions seam too. The report now reads a CSV per member run
+// of every repeated group, and evalRuns/ is git-ignored - so a rendering test
+// left on the real seam would pass locally off whatever runs happen to be on
+// disk, and fail in CI where there are none.
 func withStubbedRecords(t *testing.T, records []RunRecord, skipped []error) {
 	t.Helper()
 
 	original := loadRecords
 	loadRecords = func(string) ([]RunRecord, []error) { return records, skipped }
 	t.Cleanup(func() { loadRecords = original })
+
+	withStubbedPredictions(t, nil)
+}
+
+// withStubbedPredictions serves each run's verdicts from a map. An unlisted run
+// yields no rows rather than an error, so a test only has to describe the runs
+// it cares about.
+func withStubbedPredictions(t *testing.T, byRunID map[string][]storyVerdict) {
+	t.Helper()
+
+	original := loadPredictions
+	loadPredictions = func(_, runID string) ([]storyVerdict, error) { return byRunID[runID], nil }
+	t.Cleanup(func() { loadPredictions = original })
+}
+
+// withFailingPredictions makes one run's CSV unreadable, to exercise the skip
+// path.
+func withFailingPredictions(t *testing.T, failingRunID string) {
+	t.Helper()
+
+	original := loadPredictions
+	loadPredictions = func(_, runID string) ([]storyVerdict, error) {
+		if runID == failingRunID {
+			return nil, errors.New("failed to open predictions CSV: no such file or directory")
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() { loadPredictions = original })
 }
 
 // renderForTest runs the report and returns (stdout, stderr).
@@ -222,5 +255,155 @@ func TestShortHash(t *testing.T) {
 		if got := shortHash(c.in, c.n); got != c.want {
 			t.Errorf("shortHash(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
 		}
+	}
+}
+
+// stabilityRecords are two runs of one configuration plus a singleton, so a test
+// can check both that a repeated group gets a block and that a lone run does not.
+func stabilityRecords() []RunRecord {
+	arm3 := testRecord("20260806T090525Z-arm-3", 3)
+	return []RunRecord{
+		testRecord("20260806T084423Z-arm-2", 2),
+		testRecord("20260806T085514Z-arm-2", 2),
+		arm3,
+	}
+}
+
+func TestRenderEvalReportPrintsOneStabilityBlockPerRepeatedGroup(t *testing.T) {
+	withStubbedRecords(t, stabilityRecords(), nil)
+	withStubbedPredictions(t, map[string][]storyVerdict{
+		"20260806T084423Z-arm-2": {
+			{StoryID: 1, Label: 1, Predicted: true},
+			{StoryID: 2, Label: 1, Predicted: true},
+			{StoryID: 3, Label: 0, Predicted: false},
+		},
+		"20260806T085514Z-arm-2": {
+			{StoryID: 1, Label: 1, Predicted: true},
+			{StoryID: 2, Label: 1, Predicted: false},
+			{StoryID: 3, Label: 0, Predicted: false},
+		},
+	})
+
+	out, warn := renderForTest(t)
+
+	if got := strings.Count(out, "Per-story stability"); got != 1 {
+		t.Fatalf("got %d stability blocks, want 1 - only the arm-2 group has 2 runs:\n%s", got, out)
+	}
+	if !strings.Contains(out, "arm 2,") {
+		t.Errorf("the block does not name arm 2:\n%s", out)
+	}
+	if !strings.Contains(out, "(n=2 runs)") {
+		t.Errorf("the block does not state n:\n%s", out)
+	}
+	if warn != "" {
+		t.Errorf("unexpected warnings: %q", warn)
+	}
+}
+
+// One run measures no stability: every story it flagged was flagged by every
+// run, so a block would read as perfect consistency. Same rule as the n=1 no-±
+// convention.
+func TestRenderEvalReportPrintsNoStabilityBlockForSingleRunGroups(t *testing.T) {
+	withStubbedRecords(t, []RunRecord{testRecord("20260806T090351Z-arm-0", 0)}, nil)
+
+	out, _ := renderForTest(t)
+	if strings.Contains(out, "Per-story stability") {
+		t.Errorf("a lone run produced a stability block:\n%s", out)
+	}
+}
+
+// The stability section is an addition below the existing report, not a
+// rearrangement of it.
+func TestRenderEvalReportPlacesStabilityAfterTheGroupsTable(t *testing.T) {
+	withStubbedRecords(t, stabilityRecords(), nil)
+
+	out, _ := renderForTest(t)
+	groups := strings.Index(out, "=== Grouped by")
+	stability := strings.Index(out, "Per-story stability")
+	if groups < 0 || stability < 0 {
+		t.Fatalf("expected both sections:\n%s", out)
+	}
+	if stability < groups {
+		t.Errorf("the stability section printed before the groups table:\n%s", out)
+	}
+}
+
+// A block computed from some of a group's runs would carry a header saying n=2
+// over counts measured across one. Skip the group, name it, keep the rest.
+func TestRenderEvalReportSkipsAGroupWithUnreadablePredictions(t *testing.T) {
+	withStubbedRecords(t, stabilityRecords(), nil)
+	withFailingPredictions(t, "20260806T085514Z-arm-2")
+
+	out, warn := renderForTest(t)
+
+	if strings.Contains(out, "Per-story stability") {
+		t.Errorf("a block was printed from a partially readable group:\n%s", out)
+	}
+	if !strings.Contains(warn, "arm 2") {
+		t.Errorf("the warning does not name the skipped group: %q", warn)
+	}
+	if !strings.Contains(out, "=== Eval runs (3) ===") || !strings.Contains(out, "=== Grouped by") {
+		t.Errorf("the rest of the report was lost with the block:\n%s", out)
+	}
+}
+
+func TestFormatStabilityTableCountsAndTotals(t *testing.T) {
+	table := formatStabilityTable(stabilityTable{
+		N:          2,
+		Relevant:   stabilityBuckets{Never: 11, Sometimes: 3, Always: 21},
+		Irrelevant: stabilityBuckets{Never: 211, Sometimes: 11, Always: 74},
+	})
+
+	for _, want := range []string{"relevant (35)", "irrelevant (296)", "11", "3", "21", "211", "74"} {
+		if !strings.Contains(table, want) {
+			t.Errorf("table missing %q:\n%s", want, table)
+		}
+	}
+}
+
+// "Sometimes" is a far weaker claim at n=2, where it can only mean 1 of 2, than
+// at n=3. The column has to say which.
+func TestRunCountLabelStatesTheRunCounts(t *testing.T) {
+	tests := []struct {
+		low, high, n int
+		want         string
+	}{
+		{0, 0, 2, "(0 of 2)"},
+		{1, 1, 2, "(1 of 2)"},
+		{2, 2, 2, "(2 of 2)"},
+		{1, 2, 3, "(1-2 of 3)"},
+		{3, 3, 3, "(3 of 3)"},
+	}
+
+	for _, test := range tests {
+		if got := runCountLabel(test.low, test.high, test.n); got != test.want {
+			t.Errorf("runCountLabel(%d, %d, %d) = %q, want %q", test.low, test.high, test.n, got, test.want)
+		}
+	}
+}
+
+func TestFormatStabilityTableAdaptsColumnsToN(t *testing.T) {
+	table := formatStabilityTable(stabilityTable{N: 3})
+	for _, want := range []string{"(0 of 3)", "(1-2 of 3)", "(3 of 3)"} {
+		if !strings.Contains(table, want) {
+			t.Errorf("n=3 table missing %q:\n%s", want, table)
+		}
+	}
+}
+
+// Same rule as the runs table: an arm-0 or arm-1 group has no corpus index, and
+// a blank field there reads as an empty index rather than as no index.
+func TestStabilityHeaderMarksAbsentCorpusIndex(t *testing.T) {
+	header := stabilityHeader(runGroup{
+		Key: runGroupKey{Arm: 0, GitSHA: "1b4a0bec0ffee", Model: "claude-haiku-4-5-20251001"},
+		N:   2,
+	})
+
+	if !strings.Contains(header, ABSENT_VALUE) {
+		t.Errorf("expected %q for the absent corpus index hash: %q", ABSENT_VALUE, header)
+	}
+	// The model is a grouping key, so it is never abbreviated.
+	if !strings.Contains(header, "claude-haiku-4-5-20251001") {
+		t.Errorf("header must print the model in full: %q", header)
 	}
 }

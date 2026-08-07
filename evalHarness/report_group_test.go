@@ -209,3 +209,61 @@ func TestGroupRunsOrdering(t *testing.T) {
 		t.Errorf("first group n = %d, want 2", groups[0].N)
 	}
 }
+
+func TestGroupRunsCarriesItsMemberRunIDs(t *testing.T) {
+	arm3 := groupableRecord("20260806T090525Z-arm-3")
+	arm3.Arm = 3
+
+	groups := groupRuns([]RunRecord{
+		groupableRecord("20260806T084423Z-arm-2"),
+		arm3,
+		groupableRecord("20260806T085514Z-arm-2"),
+	})
+
+	want := map[int][]string{
+		2: {"20260806T084423Z-arm-2", "20260806T085514Z-arm-2"},
+		3: {"20260806T090525Z-arm-3"},
+	}
+	for _, g := range groups {
+		expected := want[g.Key.Arm]
+		if len(g.RunIDs) != len(expected) {
+			t.Fatalf("arm %d group has run IDs %v, want %v", g.Key.Arm, g.RunIDs, expected)
+		}
+		for i, id := range expected {
+			if g.RunIDs[i] != id {
+				t.Errorf("arm %d group run ID %d = %q, want %q", g.Key.Arm, i, g.RunIDs[i], id)
+			}
+		}
+	}
+}
+
+// The run IDs must not depend on the order the records arrived in: the stability
+// section reads a CSV per member, and a report that reorders between two
+// invocations over identical records is untestable.
+func TestGroupRunsSortsRunIDsRegardlessOfInputOrder(t *testing.T) {
+	groups := groupRuns([]RunRecord{
+		groupableRecord("20260806T085514Z-arm-2"),
+		groupableRecord("20260806T084423Z-arm-2"),
+	})
+
+	if len(groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(groups))
+	}
+	want := []string{"20260806T084423Z-arm-2", "20260806T085514Z-arm-2"}
+	for i, id := range want {
+		if groups[0].RunIDs[i] != id {
+			t.Errorf("run ID %d = %q, want %q (run IDs: %v)", i, groups[0].RunIDs[i], id, groups[0].RunIDs)
+		}
+	}
+}
+
+func TestGroupRunsKeepsNInStepWithRunIDs(t *testing.T) {
+	groups := groupRuns([]RunRecord{
+		groupableRecord("20260806T084423Z-arm-2"),
+		groupableRecord("20260806T085514Z-arm-2"),
+	})
+
+	if groups[0].N != len(groups[0].RunIDs) {
+		t.Errorf("n = %d but %d run IDs carried", groups[0].N, len(groups[0].RunIDs))
+	}
+}
