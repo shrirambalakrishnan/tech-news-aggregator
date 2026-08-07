@@ -16,7 +16,7 @@ go run . 3                      # run under arm 3 (RAG, per-story retrieval; nee
 go run . prebuild               # extract GitHub interest profile -> profile/user_context.json (occasional)
 go run . embed                  # chunk+embed profile/corpus -> profile/corpus_index.json (requires VOYAGE_API_KEY; ~20 min on Voyage free tier)
 go run . eval 0                 # eval under a specific arm (arm is REQUIRED for eval; 0|1|2|3); writes a run record to evalRuns/
-go run . eval-report            # read evalRuns/ back: every run, then per-configuration mean ± spread (free; no API call, writes nothing)
+go run . eval-report            # read evalRuns/ back: every run, per-configuration mean ± spread, then per-story stability (free; no API call, writes nothing)
 go run . calibrate-floor        # measure rag.RETRIEVAL_SIMILARITY_FLOOR from the labelled set (free; requires VOYAGE_API_KEY)
 go test ./...                   # run all tests
 go test ./hackernews_classifier/ -run TestClassifyTechNewsStory   # single test, single package
@@ -158,9 +158,9 @@ Every `go run . eval <arm>` now writes two files, both stemmed `<UTC timestamp>-
 
 ## The eval-run aggregator (issue #34)
 
-`go run . eval-report` reads `evalRuns/*.json` back and prints two tables. **Free — no Claude call, no Voyage call, and it writes nothing.** It is a view over the records, never an input to them, which is what keeps it unable to change what a future eval means.
+`go run . eval-report` reads `evalRuns/` back and prints three sections. **Free — no Claude call, no Voyage call, and it writes nothing.** It is a view over the records, never an input to them, which is what keeps it unable to change what a future eval means.
 
-Organized one file per stage, mirroring `rag`: `evalHarness/report_load.go` (INPUT — `loadRunRecords`), `report_group.go` (TRANSFORM — pure statistics), `report.go` (OUTPUT + the `RunEvalReport` entrypoint, streams injected as `calibrateFloor` does).
+Organized one file per stage, mirroring `rag`: `evalHarness/report_load.go` (INPUT — `loadRunRecords`), `report_predictions.go` (INPUT — `loadPredictionsCSV`), `report_group.go` and `report_stability.go` (TRANSFORM — pure statistics), `report.go` (OUTPUT + the `RunEvalReport` entrypoint, streams injected as `calibrateFloor` does).
 
 - **Output 1 — one row per run**, sorted by `run_id` (lexically chronological by construction): `run_id, arm, git_sha(7), dataset_hash(12), corpus_index_hash(12), model, TP, FP, TN, FN, precision, recall`. Hashes are abbreviated; **the model is not** — it is a grouping key, and truncating it could make two different models look like one configuration. An absent `corpus_index_hash` (arms 0/1) renders `—`, never blank or `0`.
 - **Output 2 — one row per configuration**, grouped by `(arm, git_sha, model, dataset_hash, corpus_index_hash)` and sorted by `n` desc then every key field asc. The tiebreak is load-bearing: Go randomises map iteration, so without a total ordering the report is nondeterministic and untestable. Counts are means; precision/recall carry mean and **sample** stddev (n−1 — the runs are draws from a non-deterministic process, not a complete population).
@@ -169,7 +169,33 @@ Organized one file per stage, mirroring `rag`: `evalHarness/report_load.go` (INP
 - **The glob is non-recursive**, deliberately: `evalRuns/datasets/` and `evalRuns/corpus_index/` hold `<sha256>.json` artifacts, and a recursive walk would try to parse a 4.4 MB corpus index as a run record.
 - **Unusable records are skipped, not fatal** — a deliberate exception to issue #11's no-fail-soft rule, since one broken file should not deny a report over the other twenty. Mitigated by printing the skip *count* into the table header (`=== Eval runs (3, 1 skipped) ===`), because `n` is the number the variance table hangs on. A JSON object with no `run_id` is skipped too: `encoding/json` ignores unknown fields, so any JSON decodes into a zero `RunRecord` and would appear as a fabricated arm-0 run scoring nothing.
 
-**Non-goals, all confirmed:** no README auto-update, no reading the per-run CSVs, no cross-configuration comparison or ranking, and the aggregator writes no files.
+**Non-goals, all confirmed:** no README auto-update, no cross-configuration comparison or ranking, and the aggregator writes no files. *(Reading the per-run CSVs was a non-goal at #34 and was retired by #37 — see below.)*
+
+### Output 3 — per-story stability (issue #37)
+
+Outputs 1 and 2 report **counts**, and counts are anonymous: `"tp": 24` is 24 tally marks, not 24 named stories. So Output 2 can say the arm-2 group averaged 22.5 TP across two runs, but not whether it was the **same** stories both times — and two runs scoring 24 and 21 average to 22.5 whether they agreed on 21 stories and disagreed on 3, or agreed on 12 and disagreed on 21. Identical mean, identical spread, opposite meaning: a stable core with a fixed failure set is a repeatable pattern worth fixing, while a different set each run means the mean is mostly luck. Identity was never stored in the record, so no arithmetic over the counts recovers it — it has to come from the per-run predictions CSV.
+
+For each group with **2 or more runs**, `k` = how many of its runs flagged a given story; `k = 0` → never, `k = n` → always, anything between → sometimes. One header, one table, six numbers:
+
+```
+=== Per-story stability — arm 2, 1b4a0be, dataset a59941fa34f7,
+     index 3daf2eee4e65, claude-haiku-4-5-20251001 (n=2 runs) ===
+
+                  never     sometimes  always
+                  (0 of 2)  (1 of 2)   (2 of 2)
+relevant (35)     11        3          21
+irrelevant (296)  211       11         74
+```
+
+- **The split sizes the remedial work**, which the lump FN cannot. A relevant story no run catches will not be caught by re-running — it needs retrieval, prompt or corpus work. One caught *sometimes* has been caught before, so a sampling fix (pinned temperature, or a verdict combined across runs) might convert it. On the arm-2 group: 21 of 35 relevant stories caught by both runs, 3 flip, 11 missed by both.
+- **n=1 groups print nothing**, the same rule as the `±` convention: one run measures no stability, since every story it flagged was flagged by every run, and a block would read as perfect consistency.
+- **Blocks follow Output 2's order**, reusing `groupRuns`' slice — the total ordering that makes Output 2 deterministic makes this section deterministic for free.
+- **Stories are keyed on `story_id`, collapsing the dataset's 341 rows to 331 distinct stories** (10 ids appear twice). Safe on both columns, not just labels: the duplicates all carry `label 0` and agree, and `writePredictionsCSV` derives `predicted` from `predictedPositiveSet`, a map keyed on `story_id`, so duplicate rows **structurally** cannot disagree about the verdict. The visible consequence is the irrelevant row totalling 296 rather than 306; all 35 relevant stories are distinct, so the relevant side — where the conclusions get drawn — is untouched. Deduping *within* a run is load-bearing rather than tidy: counting a duplicated row twice would push its flag count above `n` and the story would never bucket as "always".
+- **CSV columns are located by name, not position**, and only `story_id`/`label`/`predicted` are required — so a later column (adding `objectID`, which would preserve all 341 rows, is its own issue) leaves the reader working instead of shifting it silently onto the wrong field.
+- **A group whose CSVs cannot all be read is skipped with a warning**, not fatal — `loadRunRecords`' posture toward an unreadable record. Loading is all-or-nothing per group: a block computed from some of the runs would carry a header saying `n=2` over counts measured across one.
+- **`evalRuns/` is git-ignored, so the real numbers cannot be a committed test.** The fixtures reproduce the *shape*; reproducing the numbers above is a manual `go run . eval-report`.
+
+**Parked, deliberately:** no title lists (the CSVs are on disk and greppable), no combining-rule scores (unanimous/union precision and recall), and nothing claiming reliability at n=2 — with two runs "sometimes" can only mean 1 of 2, and "never" also absorbs stories that were merely unlucky twice.
 
 **Limitations inherited from the record and undetectable here:** `git_sha` is HEAD, not the working tree, so two runs sharing a sha may have run different uncommitted code and group as one configuration; and arm 1's `profile/user_context.json` is not hashed, so arm-1 rows group on a key omitting an input that decides their numbers. Both are printed as a footnote under Output 2.
 
