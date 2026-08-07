@@ -155,3 +155,45 @@ func TestBucketStabilityReproducesTheArm2Shape(t *testing.T) {
 	// Irrelevant: 7,8 both; 9,10 one each; 11,12 neither.
 	assertBuckets(t, "irrelevant", table.Irrelevant, 2, 2, 2)
 }
+
+// dedupeStories is where the 341 rows become 331 stories, so its contract is
+// worth pinning directly rather than only through the buckets it feeds.
+func TestDedupeStoriesKeepsTheFirstRowAndTheOrder(t *testing.T) {
+	runs := [][]storyVerdict{{
+		{StoryID: 30, Label: 0, Predicted: true},
+		{StoryID: 10, Label: 1, Predicted: false},
+		{StoryID: 30, Label: 0, Predicted: true},
+		{StoryID: 20, Label: 0, Predicted: false},
+	}}
+
+	deduped := dedupeStories(runs)
+
+	if len(deduped) != 1 {
+		t.Fatalf("got %d runs back, want 1", len(deduped))
+	}
+	want := []storyVerdict{
+		{StoryID: 30, Label: 0, Predicted: true},
+		{StoryID: 10, Label: 1, Predicted: false},
+		{StoryID: 20, Label: 0, Predicted: false},
+	}
+	if len(deduped[0]) != len(want) {
+		t.Fatalf("got %d rows, want %d: %+v", len(deduped[0]), len(want), deduped[0])
+	}
+	for i, w := range want {
+		if deduped[0][i] != w {
+			t.Errorf("row %d = %+v, want %+v", i, deduped[0][i], w)
+		}
+	}
+}
+
+// Each run is deduped independently: a story appearing once per run is not a
+// duplicate, and collapsing across runs would erase the flag count entirely.
+func TestDedupeStoriesIsPerRun(t *testing.T) {
+	row := []storyVerdict{{StoryID: 10, Label: 1, Predicted: true}}
+
+	deduped := dedupeStories([][]storyVerdict{row, row})
+
+	if len(deduped) != 2 || len(deduped[0]) != 1 || len(deduped[1]) != 1 {
+		t.Fatalf("got %+v, want the story kept once in each of the two runs", deduped)
+	}
+}

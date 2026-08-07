@@ -66,8 +66,12 @@ type stabilityTable struct {
 // All 35 relevant stories are distinct, so nothing on the relevant side moves -
 // which is where the conclusions get drawn.
 func bucketStability(runs [][]storyVerdict) stabilityTable {
-	labels := storyLabels(runs)
-	timesFlagged := countRunsFlagging(runs)
+	// Collapsed ONCE, at the top, so every step below can assume one row per
+	// story per run and none of them has to restate the rule.
+	deduped := dedupeStories(runs)
+
+	labels := storyLabels(deduped)
+	timesFlagged := countRunsFlagging(deduped)
 
 	table := stabilityTable{N: len(runs)}
 	for storyID, label := range labels {
@@ -94,7 +98,7 @@ func (b *stabilityBuckets) add(timesFlagged, runs int) {
 	}
 }
 
-// storyLabels is every distinct story the group scored, with its class.
+// storyLabels is every story the group scored, with its class.
 //
 // It is the UNIVERSE, not merely a lookup - which is why the counts alone are
 // not enough to build the table. countRunsFlagging only ever knows about stories
@@ -112,28 +116,57 @@ func storyLabels(runs [][]storyVerdict) map[int]int {
 	return labels
 }
 
-// countRunsFlagging counts, per story, how many RUNS flagged it - at most one
-// per run, however many rows that run carries for it.
-//
-// ⚠️ The per-run set is load-bearing, not tidiness. Ten story IDs appear twice
-// in the dataset, so counting rows instead of runs would let a duplicated story
-// reach 2n. That never equals n, so a story flagged by every single run would
-// bucket as "sometimes" - silently wrong, in the direction that matters.
+// countRunsFlagging counts, per story, how many runs flagged it. Takes deduped
+// runs, so one row is one run's verdict and a plain increment is correct.
 func countRunsFlagging(runs [][]storyVerdict) map[int]int {
 	counts := map[int]int{}
 
 	for _, verdicts := range runs {
-		flaggedInThisRun := map[int]bool{}
 		for _, v := range verdicts {
 			if v.Predicted {
-				flaggedInThisRun[v.StoryID] = true
+				counts[v.StoryID]++
 			}
-		}
-
-		for storyID := range flaggedInThisRun {
-			counts[storyID]++
 		}
 	}
 
 	return counts
+}
+
+// dedupeStories collapses each run's rows to one per story, keeping the first
+// and preserving order.
+//
+// ⚠️ This is the only place duplicates are handled, and it is load-bearing
+// rather than tidiness. Ten story IDs appear twice in the dataset, so counting
+// rows instead of stories would let a duplicated story reach 2n flags. That
+// never equals n, so a story flagged by every single run would bucket as
+// "sometimes" - silently wrong, in the direction that matters.
+//
+// Keeping the FIRST row is safe rather than arbitrary: the duplicated IDs all
+// carry label 0 and agree, and writePredictionsCSV derives `predicted` from a
+// map keyed on story_id, so two rows for one story structurally cannot disagree
+// about the verdict either.
+//
+// Deliberately NOT done in loadPredictionsCSV. The run record's confusion matrix
+// is computed over the CSV's 341 ROWS, so a loader that dropped rows would make
+// a CSV impossible to reconcile against the record beside it - which is the
+// property the CSV was written for.
+func dedupeStories(runs [][]storyVerdict) [][]storyVerdict {
+	deduped := make([][]storyVerdict, 0, len(runs))
+
+	for _, verdicts := range runs {
+		seen := make(map[int]bool, len(verdicts))
+		distinct := make([]storyVerdict, 0, len(verdicts))
+
+		for _, v := range verdicts {
+			if seen[v.StoryID] {
+				continue
+			}
+			seen[v.StoryID] = true
+			distinct = append(distinct, v)
+		}
+
+		deduped = append(deduped, distinct)
+	}
+
+	return deduped
 }
