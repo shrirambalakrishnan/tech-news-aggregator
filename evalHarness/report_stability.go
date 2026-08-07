@@ -66,40 +66,74 @@ type stabilityTable struct {
 // All 35 relevant stories are distinct, so nothing on the relevant side moves -
 // which is where the conclusions get drawn.
 func bucketStability(runs [][]storyVerdict) stabilityTable {
-	labels := map[int]int{}
-	flagCounts := map[int]int{}
-
-	for _, verdicts := range runs {
-		// Per run, per story: a duplicated row must not count twice toward the
-		// flag count, or a story could reach a count above n and never be
-		// bucketed as "always".
-		flaggedInThisRun := map[int]bool{}
-
-		for _, v := range verdicts {
-			labels[v.StoryID] = v.Label
-			if v.Predicted && !flaggedInThisRun[v.StoryID] {
-				flaggedInThisRun[v.StoryID] = true
-				flagCounts[v.StoryID]++
-			}
-		}
-	}
+	labels := storyLabels(runs)
+	timesFlagged := countRunsFlagging(runs)
 
 	table := stabilityTable{N: len(runs)}
 	for storyID, label := range labels {
-		bucket := &table.Irrelevant
 		if label == 1 {
-			bucket = &table.Relevant
-		}
-
-		switch flagCounts[storyID] {
-		case 0:
-			bucket.Never++
-		case len(runs):
-			bucket.Always++
-		default:
-			bucket.Sometimes++
+			table.Relevant.add(timesFlagged[storyID], len(runs))
+		} else {
+			table.Irrelevant.add(timesFlagged[storyID], len(runs))
 		}
 	}
 
 	return table
+}
+
+// add files one story under never, sometimes or always. The comparison IS the
+// bucketing: flagged by no run, by every run, or by neither extreme.
+func (b *stabilityBuckets) add(timesFlagged, runs int) {
+	switch timesFlagged {
+	case 0:
+		b.Never++
+	case runs:
+		b.Always++
+	default:
+		b.Sometimes++
+	}
+}
+
+// storyLabels is every distinct story the group scored, with its class.
+//
+// It is the UNIVERSE, not merely a lookup - which is why the counts alone are
+// not enough to build the table. countRunsFlagging only ever knows about stories
+// somebody flagged, so the "never" bucket - stories nobody flagged - would be
+// missing from it entirely and those stories would vanish silently. Every run in
+// a group shares a dataset_hash by construction of the group key, so they cannot
+// disagree about a story's label.
+func storyLabels(runs [][]storyVerdict) map[int]int {
+	labels := map[int]int{}
+	for _, verdicts := range runs {
+		for _, v := range verdicts {
+			labels[v.StoryID] = v.Label
+		}
+	}
+	return labels
+}
+
+// countRunsFlagging counts, per story, how many RUNS flagged it - at most one
+// per run, however many rows that run carries for it.
+//
+// ⚠️ The per-run set is load-bearing, not tidiness. Ten story IDs appear twice
+// in the dataset, so counting rows instead of runs would let a duplicated story
+// reach 2n. That never equals n, so a story flagged by every single run would
+// bucket as "sometimes" - silently wrong, in the direction that matters.
+func countRunsFlagging(runs [][]storyVerdict) map[int]int {
+	counts := map[int]int{}
+
+	for _, verdicts := range runs {
+		flaggedInThisRun := map[int]bool{}
+		for _, v := range verdicts {
+			if v.Predicted {
+				flaggedInThisRun[v.StoryID] = true
+			}
+		}
+
+		for storyID := range flaggedInThisRun {
+			counts[storyID]++
+		}
+	}
+
+	return counts
 }
