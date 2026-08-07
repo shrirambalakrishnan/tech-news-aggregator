@@ -212,3 +212,16 @@ func TestBucketStabilityCountsStoriesNoRunFlagged(t *testing.T) {
 	assertBuckets(t, "relevant", table.Relevant, 2, 0, 0)
 	assertBuckets(t, "irrelevant", table.Irrelevant, 1, 0, 0)
 }
+
+// The story set now comes from runs[0], so an empty group is an index panic
+// waiting to happen. The renderer never calls it below n=2, but this is a pure
+// function and its tests call it directly.
+func TestBucketStabilityWithNoRuns(t *testing.T) {
+	table := bucketStability(nil)
+
+	if table.N != 0 {
+		t.Errorf("n = %d, want 0", table.N)
+	}
+	assertBuckets(t, "relevant", table.Relevant, 0, 0, 0)
+	assertBuckets(t, "irrelevant", table.Irrelevant, 0, 0, 0)
+}

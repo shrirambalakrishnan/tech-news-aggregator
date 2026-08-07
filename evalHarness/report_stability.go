@@ -66,11 +66,16 @@ type stabilityTable struct {
 // All 35 relevant stories are distinct, so nothing on the relevant side moves -
 // which is where the conclusions get drawn.
 func bucketStability(runs [][]storyVerdict) stabilityTable {
+	if len(runs) == 0 {
+		return stabilityTable{}
+	}
+
 	// Collapsed ONCE, at the top, so every step below can assume one row per
 	// story per run and none of them has to restate the rule.
 	deduped := dedupeStories(runs)
 
-	scored := scoredStories(deduped)
+	// One run supplies the story set; every run supplies the counts.
+	scored := scoredStories(deduped[0])
 	timesFlagged := countRunsFlagging(deduped)
 
 	table := stabilityTable{N: len(runs)}
@@ -98,8 +103,8 @@ func (b *stabilityBuckets) add(timesFlagged, runs int) {
 	}
 }
 
-// scoredStories is the set of every story the group scored, carrying each one's
-// class along as the value.
+// scoredStories is the set of stories ONE run scored, carrying each one's class
+// along as the value.
 //
 // ENUMERATION is the point, not lookup - which is why the flag counts alone
 // cannot build the table. countRunsFlagging knows only about stories somebody
@@ -108,16 +113,21 @@ func (b *stabilityBuckets) add(timesFlagged, runs int) {
 // enumerated from somewhere else or they vanish and the row totals come up
 // short.
 //
-// The label write is idempotent, not a race: every run in a group shares a
-// dataset_hash by construction of the group key, so each run writes the same
-// label for the same story. The loop is a union over the runs, and the last
-// write agrees with the first.
-func scoredStories(runs [][]storyVerdict) map[int]int {
-	stories := map[int]int{}
-	for _, verdicts := range runs {
-		for _, v := range verdicts {
-			stories[v.StoryID] = v.Label
-		}
+// One run is enough because dataset_hash is part of runGroupKey: a group's runs
+// scored byte-identical dataset files, so they carry the same story ids and the
+// same labels. Unioning every run would build the identical map n times over.
+//
+// ⚠️ And unioning would be worse than merely redundant. The one realistic way a
+// group's runs could differ here is a TRUNCATED CSV - a run whose write was
+// interrupted, missing its tail. A union quietly fills those stories in from the
+// other runs, but their flag counts were computed over a run that never scored
+// them, so they slide into "never" or "sometimes" and the table prints with the
+// corruption invisible. Taking the set from one run does not detect that either,
+// but it does not disguise it.
+func scoredStories(verdicts []storyVerdict) map[int]int {
+	stories := make(map[int]int, len(verdicts))
+	for _, v := range verdicts {
+		stories[v.StoryID] = v.Label
 	}
 	return stories
 }
