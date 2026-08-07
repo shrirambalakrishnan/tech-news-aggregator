@@ -2,6 +2,7 @@ package evalHarness
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,13 +39,6 @@ type storyVerdict struct {
 // so the rendering tests never touch disk - the same shape as loadRecords.
 var loadPredictions = loadPredictionsCSV
 
-// PREDICTIONS_REQUIRED_COLUMNS are the columns the stability bucketing reads.
-// A subset of PREDICTIONS_CSV_HEADER, not the whole of it, and looked up BY NAME
-// rather than by position: a later change adding a column (objectID is the one
-// already discussed) would break a positional reader and a strict header-equality
-// check, while this keeps reading the columns it actually needs.
-var PREDICTIONS_REQUIRED_COLUMNS = []string{"story_id", "label", "predicted"}
-
 // loadPredictionsCSV reads evalRuns/<run_id>.csv into one storyVerdict per row.
 //
 // Addressed BY RUN ID, never by scanning the directory: the group being reported
@@ -72,70 +66,44 @@ func loadPredictionsCSV(dir, runID string) ([]storyVerdict, error) {
 		return nil, fmt.Errorf("predictions CSV %s is empty", path)
 	}
 
-	columns, err := predictionColumnIndexes(rows[0])
-	if err != nil {
-		return nil, fmt.Errorf("predictions CSV %s: %w", path, err)
+	columns := map[string]int{}
+	for i, name := range rows[0] {
+		columns[name] = i
 	}
 
 	verdicts := make([]storyVerdict, 0, len(rows)-1)
 	for i, row := range rows[1:] {
-		verdict, err := parseVerdict(row, columns)
-		if err != nil {
+		storyID, idErr := intColumn(row, columns, "story_id")
+		label, labelErr := intColumn(row, columns, "label")
+		predicted, predictedErr := intColumn(row, columns, "predicted")
+
+		if err := errors.Join(idErr, labelErr, predictedErr); err != nil {
 			// +2: past the header, and back to 1-based line numbers.
 			return nil, fmt.Errorf("predictions CSV %s line %d: %w", path, i+2, err)
 		}
-		verdicts = append(verdicts, verdict)
+		verdicts = append(verdicts, storyVerdict{StoryID: storyID, Label: label, Predicted: predicted == 1})
 	}
 
 	return verdicts, nil
 }
 
-// predictionColumnIndexes maps each required column name to its position in the
-// header, erroring by name when one is absent. Naming the missing column matters
-// more than it looks: the failure mode this replaces is reading the wrong column
-// silently and reporting confident numbers computed from the wrong field.
-func predictionColumnIndexes(header []string) (map[string]int, error) {
-	positions := map[string]int{}
-	for i, name := range header {
-		positions[name] = i
-	}
-
-	columns := map[string]int{}
-	for _, name := range PREDICTIONS_REQUIRED_COLUMNS {
-		index, found := positions[name]
-		if !found {
-			return nil, fmt.Errorf("missing required column %q", name)
-		}
-		columns[name] = index
-	}
-	return columns, nil
-}
-
-// parseVerdict reads one row through the resolved column positions.
-func parseVerdict(row []string, columns map[string]int) (storyVerdict, error) {
-	storyID, err := intColumn(row, columns, "story_id")
-	if err != nil {
-		return storyVerdict{}, err
-	}
-	label, err := intColumn(row, columns, "label")
-	if err != nil {
-		return storyVerdict{}, err
-	}
-	predicted, err := intColumn(row, columns, "predicted")
-	if err != nil {
-		return storyVerdict{}, err
-	}
-
-	return storyVerdict{StoryID: storyID, Label: label, Predicted: predicted == 1}, nil
-}
-
-// intColumn reads one named column as an integer. The length check guards short
-// rows: encoding/csv rejects ragged rows by default, but a caller could disable
-// that, and indexing past the end would panic rather than skip a file.
+// intColumn reads one named column as an integer, erroring by name when the
+// column is absent.
+//
+// BY NAME rather than by position, which is not fussiness: `label` and
+// `predicted` are both 0/1 ints sitting next to each other, so a positional
+// reader that got them the wrong way round would keep parsing happily and report
+// confident numbers computed from the wrong field. Every other way this can go
+// wrong is loud. It also means a column the reader does not need - adding
+// objectID is the case already discussed - leaves it working.
+//
+// Indexing is safe without a length check: csv.Reader takes FieldsPerRecord from
+// the header and rejects any row that doesn't match, so every row is exactly as
+// long as the header the indexes came from.
 func intColumn(row []string, columns map[string]int, name string) (int, error) {
-	index := columns[name]
-	if index >= len(row) {
-		return 0, fmt.Errorf("row has %d fields, too short for column %q", len(row), name)
+	index, found := columns[name]
+	if !found {
+		return 0, fmt.Errorf("missing column %q", name)
 	}
 
 	value, err := strconv.Atoi(row[index])

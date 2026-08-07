@@ -115,9 +115,12 @@ func TestLoadPredictionsCSVRejectsUnusableFiles(t *testing.T) {
 		wantMessage string
 	}{
 		{
+			// Caught at the first data row rather than by a separate header
+			// pass. Later, but by the same name - and a file with a header and
+			// no rows has nothing to read either way.
 			name:        "missing required column",
 			content:     "run_id,title,label,predicted\nrun-1,a title,1,1\n",
-			wantMessage: `missing required column "story_id"`,
+			wantMessage: `missing column "story_id"`,
 		},
 		{
 			name:        "story_id is not an integer",
