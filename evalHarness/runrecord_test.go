@@ -10,6 +10,7 @@ import (
 
 	"github.com/shrirambalakrishnan/tech-news/claudeapi"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/voyageapi"
 )
 
 // withStubbedRecording points EVAL_RUNS_DIR at a temp dir and pins the clock and
@@ -172,6 +173,8 @@ func TestRunRecordCorpusIndexHashPresence(t *testing.T) {
 			runArtifacts{DatasetHash: "d", CorpusIndexHash: "i"}, true},
 		{"arm 3 reads the index", hackernews_classifier.ArmRAGPerStory,
 			runArtifacts{DatasetHash: "d", CorpusIndexHash: "i"}, true},
+		{"arm 4 reads the index", hackernews_classifier.ArmRerank,
+			runArtifacts{DatasetHash: "d", CorpusIndexHash: "i"}, true},
 	}
 
 	for _, test := range tests {
@@ -198,5 +201,80 @@ func TestRunRecordCorpusIndexHashPresence(t *testing.T) {
 				t.Error("dataset_hash must be present for every arm")
 			}
 		})
+	}
+}
+
+// TestRunRecordRerankModelPresence: only the reranking arm records a rerank
+// model. Arms 0-3 must omit the field entirely, which is also what keeps their
+// records byte-identical to the ones already on disk - a new empty field would
+// re-write history that is meant to be immutable.
+func TestRunRecordRerankModelPresence(t *testing.T) {
+	withStubbedRecording(t, time.Now(), "sha")
+
+	tests := []struct {
+		arm       hackernews_classifier.Arm
+		wantField bool
+	}{
+		{hackernews_classifier.ArmGeneric, false},
+		{hackernews_classifier.ArmInterests, false},
+		{hackernews_classifier.ArmRAG, false},
+		{hackernews_classifier.ArmRAGPerStory, false},
+		{hackernews_classifier.ArmRerank, true},
+	}
+
+	for _, test := range tests {
+		record, err := buildRunRecord("run-1", test.arm, runArtifacts{DatasetHash: "d"}, Metrics{})
+		if err != nil {
+			t.Fatalf("arm %d: buildRunRecord returned error: %v", int(test.arm), err)
+		}
+
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("marshal failed: %v", err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatalf("unmarshal failed: %v", err)
+		}
+
+		got, present := fields["rerank_model"]
+		if present != test.wantField {
+			t.Errorf("arm %d: rerank_model present = %v, want %v", int(test.arm), present, test.wantField)
+		}
+		if test.wantField && got != voyageapi.VOYAGE_RERANK_MODEL {
+			t.Errorf("arm %d: rerank_model = %v, want the model actually called (%q)", int(test.arm), got, voyageapi.VOYAGE_RERANK_MODEL)
+		}
+	}
+}
+
+// TestWriteRunRecordRoundTripsRerankModel: a field that is written but not read
+// back is no provenance at all.
+func TestWriteRunRecordRoundTripsRerankModel(t *testing.T) {
+	dir := withStubbedRecording(t, time.Now(), "sha")
+
+	want := RunRecord{
+		RunID:           "20260808T091500Z-arm-4",
+		Arm:             4,
+		GitSHA:          "sha",
+		DatasetHash:     "d",
+		CorpusIndexHash: "i",
+		Model:           "claude-haiku-4-5-20251001",
+		RerankModel:     "rerank-2.5",
+		Metrics:         RunMetrics{TP: 19, FP: 76, TN: 230, FN: 16, Precision: 0.2000, Recall: 0.5429},
+	}
+	if err := writeRunRecord(want); err != nil {
+		t.Fatalf("writeRunRecord returned error: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, want.RunID+".json"))
+	if err != nil {
+		t.Fatalf("record not written under its run_id: %v", err)
+	}
+	var got RunRecord
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("record is not valid JSON: %v", err)
+	}
+	if got != want {
+		t.Errorf("round-tripped record = %+v, want %+v", got, want)
 	}
 }

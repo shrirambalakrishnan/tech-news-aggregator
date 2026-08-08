@@ -11,6 +11,7 @@ import (
 
 	"github.com/shrirambalakrishnan/tech-news/claudeapi"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/voyageapi"
 )
 
 // This file records WHAT an eval run used, so a number in the README can be
@@ -69,13 +70,24 @@ type RunMetrics struct {
 //     text). This is why a tuning change must be committed to be recorded -
 //     see headCommitSHA for the limitation that leaves.
 //   - Model    - the LLM that classified. Changing it re-bases every number.
+//   - RerankModel - the cross-encoder that ranked arm 4's excerpts. A second
+//     model decides its numbers, and swapping rerank-2.5 for rerank-2.5-lite
+//     would change them without touching the code, the data or the LLM.
 //   - DatasetHash / CorpusIndexHash - the data, which is git-ignored and mutable
 //     in place. Each hash names an archived copy under evalRuns/, so the bytes
 //     behind a past number are still recoverable. See artifacts.go.
 //
 // CorpusIndexHash is omitted entirely for arms 0 and 1: they never load the
 // index, and an empty string would read as "the index was empty" rather than
-// "the index was irrelevant here".
+// "the index was irrelevant here". RerankModel follows the same rule for every
+// arm that does not rerank, which also keeps arms 0-3 records byte-identical to
+// the ones already on disk.
+//
+// Records cannot be back-filled, which is why RerankModel ships with the arm
+// rather than after it: the moment anyone tries a different reranker, every
+// arm-4 record written without this field becomes permanently unattributable.
+// CLAUDE.md already carries that regret for arm 1's un-hashed
+// profile/user_context.json.
 type RunRecord struct {
 	RunID           string     `json:"run_id"`
 	Arm             int        `json:"arm"`
@@ -83,7 +95,19 @@ type RunRecord struct {
 	DatasetHash     string     `json:"dataset_hash"`
 	CorpusIndexHash string     `json:"corpus_index_hash,omitempty"`
 	Model           string     `json:"model"`
+	RerankModel     string     `json:"rerank_model,omitempty"`
 	Metrics         RunMetrics `json:"metrics"`
+}
+
+// armUsesReranker reports whether an arm calls the cross-encoder, and so whether
+// a rerank model decided its numbers.
+//
+// It mirrors rag.RetrieveRerankedContext's callers the way armUsesCorpusIndex
+// mirrors the retrieval cases of armcontext.BuildProfile, and must be updated
+// alongside them: an arm that reranks but is missing here records no
+// rerank_model and publishes numbers whose ranking side is untraceable.
+func armUsesReranker(arm hackernews_classifier.Arm) bool {
+	return arm == hackernews_classifier.ArmRerank
 }
 
 // newRunID builds the run's identity: "<UTC timestamp>-arm-<N>". It is both the
@@ -122,6 +146,11 @@ func buildRunRecord(runID string, arm hackernews_classifier.Arm, artifacts runAr
 		return RunRecord{}, err
 	}
 
+	rerankModel := ""
+	if armUsesReranker(arm) {
+		rerankModel = voyageapi.VOYAGE_RERANK_MODEL
+	}
+
 	return RunRecord{
 		RunID:           runID,
 		Arm:             int(arm),
@@ -129,6 +158,7 @@ func buildRunRecord(runID string, arm hackernews_classifier.Arm, artifacts runAr
 		DatasetHash:     artifacts.DatasetHash,
 		CorpusIndexHash: artifacts.CorpusIndexHash,
 		Model:           claudeapi.ANTHROPIC_MODEL_NAME,
+		RerankModel:     rerankModel,
 		Metrics: RunMetrics{
 			TP:        metrics.Confusion.TP,
 			FP:        metrics.Confusion.FP,

@@ -134,17 +134,20 @@ func stabilityForGroup(g runGroup) (stabilityTable, error) {
 }
 
 // stabilityHeader names the configuration in full, over two lines so it fits a
-// terminal. The model is NOT abbreviated, for the same reason it is not in the
-// groups table: it is a grouping key, and truncating it could make two different
-// models look like one configuration.
+// terminal. The model names are NOT abbreviated, for the same reason they are
+// not in the groups table: they are grouping keys, and truncating one could make
+// two different models look like one configuration. The rerank model is named
+// for the same reason it is a key at all - two blocks under identical headers
+// would be worse than not distinguishing the configurations.
 func stabilityHeader(g runGroup) string {
 	return fmt.Sprintf(
-		"=== Per-story stability — arm %d, %s, dataset %s,\n     index %s, %s (n=%d runs) ===",
+		"=== Per-story stability — arm %d, %s, dataset %s,\n     index %s, %s, rerank %s (n=%d runs) ===",
 		g.Key.Arm,
 		shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN),
 		shortHash(g.Key.DatasetHash, CONTENT_HASH_SHORT_LEN),
 		shortHash(g.Key.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
 		g.Key.Model,
+		orAbsent(g.Key.RerankModel),
 		g.N,
 	)
 }
@@ -246,7 +249,7 @@ func groupsHeader(groups int) string {
 		noun = "group"
 	}
 	return fmt.Sprintf(
-		"=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — %d %s ===",
+		"=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — %d %s ===",
 		groups, noun,
 	)
 }
@@ -262,14 +265,15 @@ func formatGroupsTable(groups []runGroup) string {
 	var b strings.Builder
 	w := newTableWriter(&b)
 
-	fmt.Fprintln(w, "arm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\tn\tTP\tFP\tTN\tFN\tprecision\trecall")
+	fmt.Fprintln(w, "arm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\trerank_model\tn\tTP\tFP\tTN\tFN\tprecision\trecall")
 	for _, g := range groups {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\t%s\n",
 			g.Key.Arm,
 			shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN),
 			shortHash(g.Key.DatasetHash, CONTENT_HASH_SHORT_LEN),
 			shortHash(g.Key.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
 			g.Key.Model,
+			orAbsent(g.Key.RerankModel),
 			g.N,
 			g.MeanTP, g.MeanFP, g.MeanTN, g.MeanFN,
 			formatAggregate(g.Precision),
@@ -314,4 +318,14 @@ func shortHash(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// orAbsent renders an empty optional field as ABSENT_VALUE, in full. Model names
+// are grouping keys, so unlike the hashes they are never abbreviated: truncating
+// one could make two different models look like one configuration.
+func orAbsent(s string) string {
+	if s == "" {
+		return ABSENT_VALUE
+	}
+	return s
 }

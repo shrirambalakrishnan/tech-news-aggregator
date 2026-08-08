@@ -14,8 +14,9 @@ func assertClose(t *testing.T, label string, got, want float64) {
 	}
 }
 
-// groupableRecord is a record whose five key fields are all set, so a test can
-// vary exactly one of them and see whether it splits the group.
+// groupableRecord is an arm-2 record: every key field set except RerankModel,
+// which only the reranking arm carries. Tests vary exactly one field and see
+// whether it splits the group.
 func groupableRecord(runID string) RunRecord {
 	return RunRecord{
 		RunID:           runID,
@@ -42,14 +43,15 @@ func TestGroupRunsCollapsesIdenticalConfigurations(t *testing.T) {
 	}
 }
 
-// Each of the five key fields must split a group on its own. Two runs that
-// differed in any of them are two experiments, and averaging across them would
-// report a real difference as if it were noise.
+// Each key field must split a group on its own. Two runs that differed in any of
+// them are two experiments, and averaging across them would report a real
+// difference as if it were noise.
 func TestGroupRunsSplitsOnEveryKeyField(t *testing.T) {
 	cases := map[string]func(*RunRecord){
 		"arm":               func(r *RunRecord) { r.Arm = 3 },
 		"git_sha":           func(r *RunRecord) { r.GitSHA = "deadbee" },
 		"model":             func(r *RunRecord) { r.Model = "claude-sonnet-5" },
+		"rerank_model":      func(r *RunRecord) { r.RerankModel = "rerank-2.5-lite" },
 		"dataset_hash":      func(r *RunRecord) { r.DatasetHash = "ffffffffffff" },
 		"corpus_index_hash": func(r *RunRecord) { r.CorpusIndexHash = "eeeeeeeeeeee" },
 	}
@@ -207,6 +209,28 @@ func TestGroupRunsOrdering(t *testing.T) {
 	}
 	if groups[0].N != 2 {
 		t.Errorf("first group n = %d, want 2", groups[0].N)
+	}
+}
+
+// TestGroupRunsOrdersByRerankModel: a key field without a tiebreak reintroduces
+// the nondeterminism the total ordering exists to prevent. Two groups differing
+// ONLY in the rerank model reach the tiebreak chain's new link, and must come
+// back in the same order however the records arrived.
+func TestGroupRunsOrdersByRerankModel(t *testing.T) {
+	lite := groupableRecord("20260808T090000Z-arm-4")
+	lite.Arm, lite.RerankModel = 4, "rerank-2.5-lite"
+	full := groupableRecord("20260808T100000Z-arm-4")
+	full.Arm, full.RerankModel = 4, "rerank-2.5"
+
+	for _, records := range [][]RunRecord{{lite, full}, {full, lite}} {
+		groups := groupRuns(records)
+		if len(groups) != 2 {
+			t.Fatalf("got %d groups, want 2 (the rerank model is a key field)", len(groups))
+		}
+		if groups[0].Key.RerankModel != "rerank-2.5" || groups[1].Key.RerankModel != "rerank-2.5-lite" {
+			t.Errorf("order = [%s %s], want ascending by rerank model whatever the input order",
+				groups[0].Key.RerankModel, groups[1].Key.RerankModel)
+		}
 	}
 }
 

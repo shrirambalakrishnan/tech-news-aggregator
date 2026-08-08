@@ -220,7 +220,7 @@ func TestRenderEvalReportPrintsBothSections(t *testing.T) {
 	out, _ := renderForTest(t)
 
 	runsAt := strings.Index(out, "=== Eval runs (2) ===")
-	groupsAt := strings.Index(out, "=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — 1 group ===")
+	groupsAt := strings.Index(out, "=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — 1 group ===")
 	if runsAt < 0 {
 		t.Fatalf("runs section missing:\n%s", out)
 	}
