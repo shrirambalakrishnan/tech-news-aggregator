@@ -1,15 +1,19 @@
 package rag
 
 import (
+	"bytes"
 	"errors"
+	"log"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/shrirambalakrishnan/tech-news/voyageapi"
 )
 
 // rerankFake is the shape of the rerankQueries DI seam.
-type rerankFake func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error)
+type rerankFake func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error)
 
 // stubRerankStage swaps all three seams arm 4's retrieval touches, so no test
 // reaches the disk or the network.
@@ -50,7 +54,7 @@ func TestRerankOrderBeatsCosineOrder(t *testing.T) {
 		func(queries []string) ([][]float32, error) {
 			return [][]float32{{1, 0}}, nil // cosine order: east, north-east, north, west
 		},
-		func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+		func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 			submitted = documents
 			// The cross-encoder disagrees with cosine: candidate 3 ("north"),
 			// which cosine ranked LAST, beats candidate 0 ("east"), which
@@ -77,18 +81,17 @@ func TestRerankOrderBeatsCosineOrder(t *testing.T) {
 
 // TestRerankSendsCandidatesPerStoryAtTheCandidateFloor pins the request shape
 // the ~52s pacing was sized for: RERANK_CANDIDATES_PER_STORY documents per
-// story, one query per story, asking for RERANK_TOP_K_PER_STORY back.
+// story, one query per story.
 func TestRerankSendsCandidatesPerStoryAtTheCandidateFloor(t *testing.T) {
 	var gotQueries []string
 	var gotDocuments [][]string
-	gotTopK := -1
 
 	stubRerankStage(t, fourChunkIndex(),
 		func(queries []string) ([][]float32, error) {
 			return [][]float32{{1, 0}, {0, 1}}, nil
 		},
-		func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
-			gotQueries, gotDocuments, gotTopK = queries, documents, topK
+		func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
+			gotQueries, gotDocuments = queries, documents
 			results := make([][]voyageapi.RerankResult, len(queries))
 			for i := range queries {
 				results[i] = []voyageapi.RerankResult{{Index: 0, RelevanceScore: 0.5}}
@@ -103,9 +106,6 @@ func TestRerankSendsCandidatesPerStoryAtTheCandidateFloor(t *testing.T) {
 
 	if !reflect.DeepEqual(gotQueries, stories) {
 		t.Errorf("queries reranked = %v, want one per story %v", gotQueries, stories)
-	}
-	if gotTopK != RERANK_TOP_K_PER_STORY {
-		t.Errorf("top_k = %d, want RERANK_TOP_K_PER_STORY (%d)", gotTopK, RERANK_TOP_K_PER_STORY)
 	}
 	// The index holds 4 chunks and RERANK_CANDIDATES_PER_STORY is 6, so every
 	// chunk is a candidate — which is exactly what the inert floor implies.
@@ -133,7 +133,7 @@ func TestRerankCandidateFloorIsInert(t *testing.T) {
 	var gotDocuments [][]string
 	stubRerankStage(t, fourChunkIndex(),
 		func(queries []string) ([][]float32, error) { return [][]float32{{1, 0}}, nil },
-		func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+		func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 			gotDocuments = documents
 			return [][]voyageapi.RerankResult{{{Index: 0, RelevanceScore: 0.5}}}, nil
 		})
@@ -157,19 +157,20 @@ func TestRerankCandidateFloorIsInert(t *testing.T) {
 	}
 }
 
-// TestRerankTruncatesResponseToTopK: "keep 2 per story" must not depend on
-// Voyage honouring top_k. If it stops, each story would contribute 6 instead of
-// 2, the pool would still cap at 20, and the run would complete and score
-// normally with the volume-matched property silently gone.
-func TestRerankTruncatesResponseToTopK(t *testing.T) {
+// TestRerankKeepsOnlyTopKPerStory: no top_k is sent, so the response carries a
+// score for every candidate and this local cut is the ONLY thing enforcing "keep
+// 2 per story". Drop it and each story would contribute 6, the pool would still
+// cap at 20, and the run would complete and score normally with the
+// volume-matched property silently gone.
+func TestRerankKeepsOnlyTopKPerStory(t *testing.T) {
 	original := RERANK_TOP_K_PER_STORY
 	RERANK_TOP_K_PER_STORY = 2
 	t.Cleanup(func() { RERANK_TOP_K_PER_STORY = original })
 
 	stubRerankStage(t, fourChunkIndex(),
 		func(queries []string) ([][]float32, error) { return [][]float32{{1, 0}}, nil },
-		func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
-			// top_k ignored: all four candidates come back.
+		func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
+			// Every submitted candidate comes back scored, best first.
 			return [][]voyageapi.RerankResult{{
 				{Index: 0, RelevanceScore: 0.9},
 				{Index: 1, RelevanceScore: 0.8},
@@ -183,7 +184,67 @@ func TestRerankTruncatesResponseToTopK(t *testing.T) {
 		t.Fatalf("RetrieveRerankedContext returned error: %v", err)
 	}
 	if len(texts) != 2 {
-		t.Fatalf("pooled %d excerpts from one story, want %d — the response was not truncated locally", len(texts), RERANK_TOP_K_PER_STORY)
+		t.Fatalf("pooled %d excerpts from one story, want %d — the local cut did not run", len(texts), RERANK_TOP_K_PER_STORY)
+	}
+	// The cut must keep the BEST two, not the first two off the wire in some
+	// other order - the response is descending by score.
+	if !reflect.DeepEqual(texts, []string{"east", "north-east"}) {
+		t.Fatalf("texts = %v, want the two highest-scoring candidates", texts)
+	}
+}
+
+// TestRerankLogsEveryScoredCandidateNotJustTheKept is why no top_k is sent. The
+// run log is the score dump a rerank floor gets calibrated from, and a floor is
+// a decision about where to cut — so a dump censored at the current cut cannot
+// inform one. The discarded scores cost nothing extra: the cross-encoder scored
+// them either way.
+func TestRerankLogsEveryScoredCandidateNotJustTheKept(t *testing.T) {
+	original := RERANK_TOP_K_PER_STORY
+	RERANK_TOP_K_PER_STORY = 2
+	t.Cleanup(func() { RERANK_TOP_K_PER_STORY = original })
+
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	stubRerankStage(t, fourChunkIndex(),
+		func(queries []string) ([][]float32, error) { return [][]float32{{1, 0}}, nil },
+		func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
+			return [][]voyageapi.RerankResult{{
+				{Index: 0, RelevanceScore: 0.90},
+				{Index: 1, RelevanceScore: 0.80},
+				{Index: 2, RelevanceScore: 0.70},
+				{Index: 3, RelevanceScore: 0.60},
+			}}, nil
+		})
+
+	if _, err := RetrieveRerankedContext([]string{"a story"}); err != nil {
+		t.Fatalf("RetrieveRerankedContext returned error: %v", err)
+	}
+
+	var scoreLines []string
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.Contains(line, "rerank-score,") {
+			scoreLines = append(scoreLines, line)
+		}
+	}
+	if len(scoreLines) != 4 {
+		t.Fatalf("logged %d score lines, want 4 (one per scored candidate, not per kept chunk):\n%s",
+			len(scoreLines), strings.Join(scoreLines, "\n"))
+	}
+
+	// The kept flag is what makes the dump readable: without it a consumer
+	// cannot tell which side of the cut a score fell on.
+	for i, line := range scoreLines {
+		wantKept := i < RERANK_TOP_K_PER_STORY
+		if got := strings.HasSuffix(line, ",true"); got != wantKept {
+			t.Errorf("score line %d kept=%v, want %v: %s", i, got, wantKept, line)
+		}
+	}
+	// Both scores travel together - a rerank floor is only interesting against
+	// the cosine ranking it replaces.
+	if !strings.Contains(scoreLines[0], "1.000000,0.900000") {
+		t.Errorf("first score line carries %q, want both the cosine and rerank scores", scoreLines[0])
 	}
 }
 
@@ -199,7 +260,7 @@ func TestRerankPoolsDedupedAndCapped(t *testing.T) {
 		func(queries []string) ([][]float32, error) {
 			return [][]float32{{1, 0}, {1, 0}, {0, 1}}, nil
 		},
-		func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+		func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 			// Stories one and two keep candidate 0 ("east", their cosine
 			// leader) and story two scores it highest; story three, which
 			// points north, keeps its own candidates 0 ("north") and 1
@@ -245,7 +306,7 @@ func TestRerankSkipsStoriesWithNoCandidates(t *testing.T) {
 			// south-west and clears nothing.
 			return [][]float32{{1, 0}, {-0.6, -0.8}}, nil
 		},
-		func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+		func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 			gotQueries, gotDocuments = queries, documents
 			return [][]voyageapi.RerankResult{{{Index: 0, RelevanceScore: 0.7}}}, nil
 		})
@@ -273,7 +334,7 @@ func TestRerankSkipsStoriesWithNoCandidates(t *testing.T) {
 func TestRerankReturnsNothingWhenNoStoryHasCandidates(t *testing.T) {
 	stubRerankStage(t, CorpusIndex{},
 		func(queries []string) ([][]float32, error) { return [][]float32{{1, 0}}, nil },
-		func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+		func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 			t.Fatal("the reranker was called with no candidates")
 			return nil, nil
 		})
@@ -294,7 +355,7 @@ func TestRerankRejectsOutOfRangeResultIndex(t *testing.T) {
 	for _, index := range []int{-1, 99} {
 		stubRerankStage(t, fourChunkIndex(),
 			func(queries []string) ([][]float32, error) { return [][]float32{{1, 0}}, nil },
-			func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+			func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 				return [][]voyageapi.RerankResult{{{Index: index, RelevanceScore: 0.5}}}, nil
 			})
 
@@ -328,7 +389,7 @@ func TestRerankFailuresAreErrorsNeverDegradedContext(t *testing.T) {
 	t.Run("embedding failure", func(t *testing.T) {
 		stubRerankStage(t, fourChunkIndex(),
 			func(queries []string) ([][]float32, error) { return nil, errors.New("voyage down") },
-			func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+			func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 				t.Fatal("the reranker was called after the embed step failed")
 				return nil, nil
 			})
@@ -341,7 +402,7 @@ func TestRerankFailuresAreErrorsNeverDegradedContext(t *testing.T) {
 	t.Run("embedded query count mismatch", func(t *testing.T) {
 		stubRerankStage(t, fourChunkIndex(),
 			func(queries []string) ([][]float32, error) { return [][]float32{{1, 0}}, nil },
-			func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+			func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 				t.Fatal("the reranker was called on a short embedding result")
 				return nil, nil
 			})
@@ -354,7 +415,7 @@ func TestRerankFailuresAreErrorsNeverDegradedContext(t *testing.T) {
 	t.Run("rerank failure", func(t *testing.T) {
 		stubRerankStage(t, fourChunkIndex(),
 			func(queries []string) ([][]float32, error) { return [][]float32{{1, 0}}, nil },
-			func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+			func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 				return nil, errors.New("rate limited into the ground")
 			})
 
@@ -366,7 +427,7 @@ func TestRerankFailuresAreErrorsNeverDegradedContext(t *testing.T) {
 	t.Run("rerank result count mismatch", func(t *testing.T) {
 		stubRerankStage(t, fourChunkIndex(),
 			func(queries []string) ([][]float32, error) { return [][]float32{{1, 0}, {0, 1}}, nil },
-			func(queries []string, documents [][]string, topK int) ([][]voyageapi.RerankResult, error) {
+			func(queries []string, documents [][]string) ([][]voyageapi.RerankResult, error) {
 				return [][]voyageapi.RerankResult{{{Index: 0, RelevanceScore: 0.5}}}, nil
 			})
 

@@ -39,8 +39,8 @@ var RERANK_TOKENS_PER_CALL = 7859
 
 // RerankResult is one scored document. Index is its position in the SUBMITTED
 // documents slice, which is what maps a score back to the chunk it came from:
-// the API returns results reordered by score and truncated to topK, so position
-// in the response says nothing about which document was scored.
+// the API returns results reordered by score, so position in the response says
+// nothing about which document was scored.
 type RerankResult struct {
 	Index          int
 	RelevanceScore float64
@@ -51,22 +51,29 @@ type RerankResult struct {
 // pacing, retry and result mapping without hitting the network.
 var rerankBatch = rerankHTTP
 
-// Rerank scores documents against a single query, returning at most topK
-// results, best first. One query, one request; pacing between requests is
-// RerankMany's job, so a lone call pays no delay — only the 429 retry backstop.
+// Rerank scores documents against a single query, returning ONE result per
+// submitted document, best first. One query, one request; pacing between
+// requests is RerankMany's job, so a lone call pays no delay — only the 429
+// retry backstop.
+//
+// It returns every score rather than a top-k slice because the endpoint charges
+// for all of them regardless (see RerankRequest): truncating here would discard
+// measurements already paid for, and the ones below the caller's cut are exactly
+// what a rerank floor would have to be calibrated against. Deciding how many to
+// keep is the caller's job.
 //
 // The retry loop mirrors embedBatchWithRetry's shape and is deliberately written
 // out rather than extracted into a shared helper: the two endpoints return
 // different types, and generalizing would rewrite a working, already-evaluated
 // embeddings path for no gain to this one.
-func Rerank(query string, documents []string, topK int) ([]RerankResult, error) {
+func Rerank(query string, documents []string) ([]RerankResult, error) {
 	if len(documents) == 0 {
 		return nil, fmt.Errorf("rerank: no documents to score for query %q", query)
 	}
 
 	var lastErr error
 	for attempt := 0; attempt <= VOYAGE_MAX_RETRIES; attempt++ {
-		results, err := rerankBatch(query, documents, topK)
+		results, err := rerankBatch(query, documents)
 		if err == nil {
 			return results, nil
 		}
@@ -86,7 +93,8 @@ func Rerank(query string, documents []string, topK int) ([]RerankResult, error) 
 // RerankMany scores each query against its own document list — the arm-4
 // entrypoint, where one query is one story's title and its documents are that
 // story's cosine-selected candidate chunks. Results come back one list per
-// query, in query order.
+// query, in query order, each carrying a score for EVERY document that query
+// submitted (see Rerank).
 //
 // Unlike embeddings, this cannot be batched: a cross-encoder scores one (query,
 // document set) pair per call, so N stories cost N requests. That is what makes
@@ -108,7 +116,7 @@ func Rerank(query string, documents []string, topK int) ([]RerankResult, error) 
 // a sleep seam that costs more than it buys); a stray trailing sleep would add
 // ~52s x 12 batches ≈ 10 min to a ~5h eval, so it is cheap to get wrong and
 // cheap to notice.
-func RerankMany(queries []string, documents [][]string, topK int) ([][]RerankResult, error) {
+func RerankMany(queries []string, documents [][]string) ([][]RerankResult, error) {
 	if len(queries) != len(documents) {
 		return nil, fmt.Errorf("rerank: %d queries but %d document lists", len(queries), len(documents))
 	}
@@ -120,7 +128,7 @@ func RerankMany(queries []string, documents [][]string, topK int) ([][]RerankRes
 	for i, query := range queries {
 		log.Printf("voyage: reranking query %d/%d (%d documents, ~%d tokens)", i+1, len(queries), len(documents[i]), RERANK_TOKENS_PER_CALL)
 
-		results, err := Rerank(query, documents[i], topK)
+		results, err := Rerank(query, documents[i])
 		if err != nil {
 			return nil, fmt.Errorf("rerank query %d/%d: %w", i+1, len(queries), err)
 		}

@@ -326,11 +326,22 @@ instead of 6. Cosine narrows, the cross-encoder reorders.
    *unconditionally* and caps the pool afterwards — nothing is dropped for
    scoring low. Shipping reorder-only keeps arm 4 a single-variable change and
    matches the `calibrate-floor` lesson (measure before adding a knob). Every
-   kept `(story, chunk)` pair's cosine **and** rerank score is logged CSV-shaped
-   (`rag: rerank-score,<query>,<source>,<chunk_index>,<cosine>,<rerank>`), so a
-   rerank floor can be calibrated from the arm-4 run itself instead of a second
-   paid one. Logging rather than writing a file keeps `rag` free of new
+   **scored** `(story, chunk)` pair's cosine **and** rerank score is logged
+   CSV-shaped
+   (`rag: rerank-score,<query>,<source>,<chunk_index>,<cosine>,<rerank>,<kept>`),
+   so a rerank floor can be calibrated from the arm-4 run itself instead of a
+   second paid one. Logging rather than writing a file keeps `rag` free of new
    artifacts — it writes the index and nothing else.
+   > **This is why no `top_k` is sent** (`voyageapi.RerankRequest`). `top_k`
+   > truncates only the *response*: the cross-encoder scores every submitted
+   > document either way and Voyage bills on query + document tokens, so asking
+   > for fewer results saves no money, no compute and no pacing — it only
+   > discards measurements already paid for. And they are the ones that matter:
+   > a floor is a decision about **where to cut**, so a dump censored at the
+   > current cut cannot inform one. At 6 candidates and `k` = 2 that is 4 free
+   > scores per story, ~1,360 per eval run, on a run nobody wants to repeat. The
+   > `kept` column is what tells a consumer which side of the cut a score fell
+   > on.
 4. **Baseline is the recorded NO-FLOOR arm 3 row (19/76/230/16) — a choice, not a
    default.** At HEAD `RETRIEVAL_SIMILARITY_FLOOR = 0.3330`, so arm 3 runs at
    **7.1 excerpts/call**; arm 4 (candidate floor 0) should land near arm 3's
@@ -385,12 +396,13 @@ document)` pair and only loosely comparable **across** queries. Cosine already
 carried that caveat; this is a sharper version of it, since nothing normalizes a
 cross-encoder's outputs between queries.
 
-**Two safeguards that exist because the failure mode is silent.** (1) The rerank
-response is truncated to `RERANK_TOP_K_PER_STORY` **locally** as well as via
-`top_k`: if Voyage ever stops honouring the field, each story would contribute 6
-excerpts instead of 2, the pool would still cap at 20, and the run would complete
-and score normally with the volume-matched property — the whole basis of the
-arm-3 comparison — silently gone. (2) `RerankResult.Index` is bounds-checked in
+**Two things that exist because the failure mode is silent.** (1) Since no
+`top_k` is sent, the response carries a score per candidate and the cut to
+`RERANK_TOP_K_PER_STORY` in `rag.rerankCandidateSets` is the **only** thing
+enforcing "keep 2 per story". Drop it and each story contributes 6 excerpts
+instead of 2, the pool still caps at 20, and the run completes and scores
+normally with the volume-matched property — the whole basis of the arm-3
+comparison — silently gone. (2) `RerankResult.Index` is bounds-checked in
 **both** `voyageapi` and `rag`, because the `rerankQueries` seam is swappable and
 `rag` is where an out-of-range value would panic mid-eval.
 

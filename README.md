@@ -136,8 +136,11 @@ When the script tries to filter the interested news items
 
 1. Cosine-select `RERANK_CANDIDATES_PER_STORY` (6) candidates — at a *permissive*
    floor, since this stage is now about recall, not relevance
-2. Send (title, 6 chunks) to Voyage `/v1/rerank` with `rerank-2.5`
-3. Keep the top `RERANK_TOP_K_PER_STORY` (2) by relevance score
+2. Send (title, 6 chunks) to Voyage `/v1/rerank` with `rerank-2.5` — with no
+   `top_k`, so every candidate comes back scored
+3. Keep the top `RERANK_TOP_K_PER_STORY` (2) by relevance score, and log all 6
+   scores — the 4 discarded ones are already paid for and are what a future
+   rerank floor gets calibrated against
 4. Pool, dedupe and cap exactly as arm 3 does — `poolChunks` is unchanged, so the
    pool is now ordered by cross-encoder score instead of cosine
 
@@ -588,9 +591,12 @@ the line means **"did not lose ground"**, not "beat arm 3". At 35 positives the
 standard error on recall is ~8pp, so anything under ~1 SE is noise.
 
 The run also dumps every kept (story, chunk) pair's cosine **and** rerank score to
-the log (`rag: rerank-score,...`). Those lines are the input to a future
-rerank-floor experiment — grab them from the run log before it is lost, since the
-alternative is paying for a second ~5h run.
+the log (`rag: rerank-score,<query>,<source>,<chunk_index>,<cosine>,<rerank>,<kept>`)
+— **all 6 per story, not just the 2 kept**, since no `top_k` is sent and the
+discarded scores cost nothing extra. Those lines are the input to a future
+rerank-floor experiment, and a floor is a decision about where to cut, so it
+needs both sides of the current cut. Grab them from the run log before it is
+lost; the alternative is paying for a second ~5h run.
 
 ## Setup
 

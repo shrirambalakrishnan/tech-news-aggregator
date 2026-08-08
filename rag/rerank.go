@@ -204,7 +204,7 @@ func rerankCandidateSets(sets []candidateSet) ([][]scoredChunk, error) {
 		documents = append(documents, texts)
 	}
 
-	results, err := rerankQueries(queries, documents, RERANK_TOP_K_PER_STORY)
+	results, err := rerankQueries(queries, documents)
 	if err != nil {
 		return nil, fmt.Errorf("failed to rerank retrieval candidates: %w", err)
 	}
@@ -214,19 +214,15 @@ func rerankCandidateSets(sets []candidateSet) ([][]scoredChunk, error) {
 
 	perStory := make([][]scoredChunk, 0, len(sets))
 	for i, set := range sets {
-		// Truncate locally as well as asking for top_k. Without this, "keep 2
-		// per story" is enforced solely by Voyage honouring the field: if it
-		// ever stops, each story contributes 6 instead of 2, the pool still
-		// caps at 20, the run still completes and scores normally — and the
-		// volume-matched property the whole arm-4 vs arm-3 comparison rests on
-		// is silently gone.
-		scored := results[i]
-		if len(scored) > RERANK_TOP_K_PER_STORY {
-			scored = scored[:RERANK_TOP_K_PER_STORY]
-		}
-
-		kept := make([]scoredChunk, 0, len(scored))
-		for _, result := range scored {
+		// The reranker scores every candidate and no top_k is sent, so keeping
+		// RERANK_TOP_K_PER_STORY is enforced HERE and nowhere else. It is what
+		// holds the volume-matched property the arm-4 vs arm-3 comparison rests
+		// on: drop it and each story would contribute
+		// RERANK_CANDIDATES_PER_STORY (6) instead of 2, the pool would still cap
+		// at 20, and the run would complete and score normally with the property
+		// silently gone.
+		kept := make([]scoredChunk, 0, RERANK_TOP_K_PER_STORY)
+		for rank, result := range results[i] {
 			// The index addresses this story's submitted candidates. Checked
 			// here as well as in voyageapi because the seam above is swappable
 			// and this is where an out-of-range value would panic.
@@ -234,23 +230,39 @@ func rerankCandidateSets(sets []candidateSet) ([][]scoredChunk, error) {
 				return nil, fmt.Errorf("rerank result index %d out of range for %d candidates of query %q", result.Index, len(set.candidates), set.query)
 			}
 			candidate := set.candidates[result.Index]
-			kept = append(kept, scoredChunk{chunk: candidate.chunk, score: result.RelevanceScore})
-			logRerankScore(set.query, candidate, result.RelevanceScore)
+
+			// Log BEFORE the cut, so the dump carries the discarded candidates
+			// too - they are already scored and paid for, and a rerank floor is
+			// a decision about where to cut, which needs to see both sides of
+			// it.
+			isKept := rank < RERANK_TOP_K_PER_STORY
+			logRerankScore(set.query, candidate, result.RelevanceScore, isKept)
+			if isKept {
+				kept = append(kept, scoredChunk{chunk: candidate.chunk, score: result.RelevanceScore})
+			}
 		}
 		perStory = append(perStory, kept)
 	}
 	return perStory, nil
 }
 
-// logRerankScore emits one CSV-shaped line per kept (story, chunk) pair carrying
-// BOTH scores, so the run log doubles as the score dump a rerank floor would be
-// calibrated from — which is what lets that experiment reuse the arm-4 run
-// instead of paying for a second one.
+// logRerankScore emits one CSV-shaped line per SCORED (story, chunk) pair -
+// every candidate, not only the kept ones - carrying both scores and whether the
+// pair survived the cut:
+//
+//	rag: rerank-score,<query>,<source>,<chunk_index>,<cosine>,<rerank>,<kept>
+//
+// The run log is the score dump a rerank floor would be calibrated from, which
+// is what lets that experiment reuse the arm-4 run instead of paying ~5h for a
+// second one. Logging the discarded candidates is the whole value: a floor is a
+// decision about where to cut, and a dump censored at the current cut cannot
+// inform one. They cost nothing extra - the cross-encoder scored them either way
+// (see voyageapi.RerankRequest on why no top_k is sent).
 //
 // Logged rather than written to a file on purpose: rag writes the corpus index
 // and nothing else, and eval-run-logs/ is already where this repo recovers
 // per-run numbers from. The query is quoted because titles contain commas.
-func logRerankScore(query string, candidate scoredChunk, rerankScore float64) {
-	log.Printf("rag: rerank-score,%q,%s,%d,%.6f,%.6f",
-		query, candidate.chunk.Source, candidate.chunk.ChunkIndex, candidate.score, rerankScore)
+func logRerankScore(query string, candidate scoredChunk, rerankScore float64, kept bool) {
+	log.Printf("rag: rerank-score,%q,%s,%d,%.6f,%.6f,%t",
+		query, candidate.chunk.Source, candidate.chunk.ChunkIndex, candidate.score, rerankScore, kept)
 }

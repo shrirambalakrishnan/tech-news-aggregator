@@ -8,7 +8,7 @@ import (
 )
 
 // stubRerank swaps the network seam for the duration of the test.
-func stubRerank(t *testing.T, fake func(query string, documents []string, topK int) ([]RerankResult, error)) {
+func stubRerank(t *testing.T, fake func(query string, documents []string) ([]RerankResult, error)) {
 	t.Helper()
 	original := rerankBatch
 	rerankBatch = fake
@@ -16,15 +16,15 @@ func stubRerank(t *testing.T, fake func(query string, documents []string, topK i
 }
 
 // TestRerankMapsResultsBackToSubmittedDocuments is the load-bearing test of the
-// whole endpoint: Voyage returns results reordered by score and truncated to
-// top_k, so the ONLY thing tying a score to the chunk it belongs to is Index.
+// whole endpoint: Voyage returns results reordered by score, so the ONLY thing
+// tying a score to the chunk it belongs to is Index.
 // Get this wrong and every score is silently attached to the wrong chunk while
 // the run completes and scores normally.
 func TestRerankMapsResultsBackToSubmittedDocuments(t *testing.T) {
 	noPacing(t)
 	documents := []string{"doc-0", "doc-1", "doc-2", "doc-3"}
 
-	stubRerank(t, func(query string, docs []string, topK int) ([]RerankResult, error) {
+	stubRerank(t, func(query string, docs []string) ([]RerankResult, error) {
 		// The third submitted document is the best match, the first the worst.
 		return []RerankResult{
 			{Index: 2, RelevanceScore: 0.91},
@@ -32,7 +32,7 @@ func TestRerankMapsResultsBackToSubmittedDocuments(t *testing.T) {
 		}, nil
 	})
 
-	results, err := Rerank("a story title", documents, 2)
+	results, err := Rerank("a story title", documents)
 	if err != nil {
 		t.Fatalf("Rerank returned error: %v", err)
 	}
@@ -50,15 +50,20 @@ func TestRerankMapsResultsBackToSubmittedDocuments(t *testing.T) {
 	}
 }
 
-// TestRerankRequestBodyCarriesModelQueryAndTopK pins what actually reaches the
-// wire. The model id is the one the plan had to correct ("rerank2.5" is not a
-// valid Voyage id), and top_k is what keeps each story to two chunks.
-func TestRerankRequestBodyCarriesModelQueryAndTopK(t *testing.T) {
+// TestRerankRequestBodyCarriesModelAndQuery pins what actually reaches the wire.
+// The model id is the one the plan had to correct ("rerank2.5" is not a valid
+// Voyage id).
+//
+// It also pins the ABSENCE of top_k, which is a deliberate choice and not an
+// omission: top_k would truncate only the response, while the cross-encoder
+// scores - and Voyage bills for - every submitted document either way. Sending
+// it would discard the below-the-cut scores that a future rerank floor has to be
+// calibrated against. See RerankRequest.
+func TestRerankRequestBodyCarriesModelAndQuery(t *testing.T) {
 	body := RerankRequest{
 		Model:           VOYAGE_RERANK_MODEL,
 		Query:           "Show HN: a thing",
 		Documents:       []string{"a", "b"},
-		TopK:            2,
 		ReturnDocuments: false,
 	}
 
@@ -78,8 +83,8 @@ func TestRerankRequestBodyCarriesModelQueryAndTopK(t *testing.T) {
 	if decoded["query"] != "Show HN: a thing" {
 		t.Fatalf("query = %v", decoded["query"])
 	}
-	if decoded["top_k"] != float64(2) {
-		t.Fatalf("top_k = %v, want 2", decoded["top_k"])
+	if _, present := decoded["top_k"]; present {
+		t.Fatalf("top_k reached the wire (%v): the response must carry a score for every candidate", decoded["top_k"])
 	}
 	// Documents are mapped back by index, so echoing their text would triple
 	// the response for nothing.
@@ -94,12 +99,12 @@ func TestRerankRequestBodyCarriesModelQueryAndTopK(t *testing.T) {
 func TestRerankRejectsEmptyDocuments(t *testing.T) {
 	noPacing(t)
 	called := false
-	stubRerank(t, func(query string, docs []string, topK int) ([]RerankResult, error) {
+	stubRerank(t, func(query string, docs []string) ([]RerankResult, error) {
 		called = true
 		return nil, nil
 	})
 
-	if _, err := Rerank("title", nil, 2); err == nil {
+	if _, err := Rerank("title", nil); err == nil {
 		t.Fatal("expected an error for an empty document list, got nil")
 	}
 	if called {
@@ -113,12 +118,12 @@ func TestRerankRejectsEmptyDocuments(t *testing.T) {
 func TestRerankManyRejectsLengthMismatch(t *testing.T) {
 	noPacing(t)
 	called := false
-	stubRerank(t, func(query string, docs []string, topK int) ([]RerankResult, error) {
+	stubRerank(t, func(query string, docs []string) ([]RerankResult, error) {
 		called = true
 		return nil, nil
 	})
 
-	if _, err := RerankMany([]string{"a", "b"}, [][]string{{"doc"}}, 2); err == nil {
+	if _, err := RerankMany([]string{"a", "b"}, [][]string{{"doc"}}); err == nil {
 		t.Fatal("expected an error for 2 queries and 1 document list, got nil")
 	}
 	if called {
@@ -131,12 +136,12 @@ func TestRerankManyRejectsLengthMismatch(t *testing.T) {
 func TestRerankManyReturnsOneResultListPerQueryInOrder(t *testing.T) {
 	noPacing(t)
 	var seen []string
-	stubRerank(t, func(query string, docs []string, topK int) ([]RerankResult, error) {
+	stubRerank(t, func(query string, docs []string) ([]RerankResult, error) {
 		seen = append(seen, query)
 		return []RerankResult{{Index: 0, RelevanceScore: float64(len(seen))}}, nil
 	})
 
-	results, err := RerankMany([]string{"q0", "q1", "q2"}, [][]string{{"a"}, {"b"}, {"c"}}, 2)
+	results, err := RerankMany([]string{"q0", "q1", "q2"}, [][]string{{"a"}, {"b"}, {"c"}})
 	if err != nil {
 		t.Fatalf("RerankMany returned error: %v", err)
 	}
@@ -158,7 +163,7 @@ func TestRerankManyReturnsOneResultListPerQueryInOrder(t *testing.T) {
 func TestRerankRetriesOn429ThenSucceeds(t *testing.T) {
 	noPacing(t)
 	attempts := 0
-	stubRerank(t, func(query string, docs []string, topK int) ([]RerankResult, error) {
+	stubRerank(t, func(query string, docs []string) ([]RerankResult, error) {
 		attempts++
 		if attempts < 3 {
 			return nil, &RateLimitError{Status: "429 Too Many Requests", Body: "slow down"}
@@ -166,7 +171,7 @@ func TestRerankRetriesOn429ThenSucceeds(t *testing.T) {
 		return []RerankResult{{Index: 0, RelevanceScore: 0.5}}, nil
 	})
 
-	results, err := Rerank("title", []string{"doc"}, 1)
+	results, err := Rerank("title", []string{"doc"})
 	if err != nil {
 		t.Fatalf("Rerank returned error: %v", err)
 	}
@@ -183,12 +188,12 @@ func TestRerankRetriesOn429ThenSucceeds(t *testing.T) {
 func TestRerankExhaustsRetries(t *testing.T) {
 	noPacing(t)
 	attempts := 0
-	stubRerank(t, func(query string, docs []string, topK int) ([]RerankResult, error) {
+	stubRerank(t, func(query string, docs []string) ([]RerankResult, error) {
 		attempts++
 		return nil, &RateLimitError{Status: "429 Too Many Requests", Body: "slow down"}
 	})
 
-	if _, err := Rerank("title", []string{"doc"}, 1); err == nil {
+	if _, err := Rerank("title", []string{"doc"}); err == nil {
 		t.Fatal("expected an error after exhausting retries, got nil")
 	}
 	if attempts != VOYAGE_MAX_RETRIES+1 {
@@ -202,12 +207,12 @@ func TestRerankFailsFastOnNonRateLimitError(t *testing.T) {
 	noPacing(t)
 	attempts := 0
 	boom := errors.New("unexpected status 400 Bad Request")
-	stubRerank(t, func(query string, docs []string, topK int) ([]RerankResult, error) {
+	stubRerank(t, func(query string, docs []string) ([]RerankResult, error) {
 		attempts++
 		return nil, boom
 	})
 
-	_, err := Rerank("title", []string{"doc"}, 1)
+	_, err := Rerank("title", []string{"doc"})
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected the underlying error back, got %v", err)
 	}

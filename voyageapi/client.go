@@ -63,17 +63,24 @@ type Response struct {
 // RerankRequest is the wire shape of POST /v1/rerank. ReturnDocuments is sent
 // false: results are mapped back to chunks by Index, so echoing the document
 // text back would triple the response for nothing.
+//
+// There is deliberately no top_k field. It would only truncate the RESPONSE -
+// the cross-encoder scores every submitted document either way, and Voyage bills
+// on query + document tokens, so asking for fewer results saves no money, no
+// compute and no pacing. What it does cost is measurement: the scores below the
+// cut are already paid for, and they are exactly the ones a future rerank floor
+// has to be calibrated against. The caller keeps what it wants (see
+// rag.RERANK_TOP_K_PER_STORY) and logs the rest.
 type RerankRequest struct {
 	Model           string   `json:"model"`
 	Query           string   `json:"query"`
 	Documents       []string `json:"documents"`
-	TopK            int      `json:"top_k,omitempty"`
 	ReturnDocuments bool     `json:"return_documents"`
 }
 
 // RerankData is one scored document. Index is its position in the SUBMITTED
 // documents slice — the only thing tying a score back to the chunk it belongs
-// to, since the API returns results reordered and truncated to top_k.
+// to, since the API returns results reordered by score.
 type RerankData struct {
 	Index          int     `json:"index"`
 	RelevanceScore float64 `json:"relevance_score"`
@@ -89,16 +96,15 @@ type RerankResponse struct {
 }
 
 // rerankHTTP scores documents against query in a single HTTP request, returning
-// at most topK results. Voyage returns them already sorted by descending
-// relevance score; that order is preserved rather than re-sorted here, since
-// re-sorting would paper over a change in the API's contract instead of letting
-// it surface.
-func rerankHTTP(query string, documents []string, topK int) ([]RerankResult, error) {
+// one result per submitted document. Voyage returns them already sorted by
+// descending relevance score; that order is preserved rather than re-sorted
+// here, since re-sorting would paper over a change in the API's contract instead
+// of letting it surface.
+func rerankHTTP(query string, documents []string) ([]RerankResult, error) {
 	reqBody := RerankRequest{
 		Model:           VOYAGE_RERANK_MODEL,
 		Query:           query,
 		Documents:       documents,
-		TopK:            topK,
 		ReturnDocuments: false,
 	}
 
