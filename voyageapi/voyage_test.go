@@ -9,24 +9,17 @@ import (
 )
 
 // noPacing zeroes the sleeps so rate-limit pacing/backoff don't slow tests, and
-// restores them afterwards. It covers both endpoints: VOYAGE_RATE_SAFETY is
-// shared by paceFor, but the gaps and backoffs are per endpoint, and a rerank
-// test that only zeroed the embeddings knobs would wait a real minute.
+// restores them afterwards. One set of knobs covers both endpoints.
 func noPacing(t *testing.T) {
 	t.Helper()
 	gap, backoff, safety := VOYAGE_MIN_REQUEST_GAP, VOYAGE_RETRY_BACKOFF, VOYAGE_RATE_SAFETY
-	rerankGap, rerankBackoff := VOYAGE_RERANK_MIN_REQUEST_GAP, VOYAGE_RERANK_RETRY_BACKOFF
 	VOYAGE_MIN_REQUEST_GAP = 0
 	VOYAGE_RETRY_BACKOFF = 0
 	VOYAGE_RATE_SAFETY = 0 // zeroes the token-proportional pacing term too
-	VOYAGE_RERANK_MIN_REQUEST_GAP = 0
-	VOYAGE_RERANK_RETRY_BACKOFF = 0
 	t.Cleanup(func() {
 		VOYAGE_MIN_REQUEST_GAP = gap
 		VOYAGE_RETRY_BACKOFF = backoff
 		VOYAGE_RATE_SAFETY = safety
-		VOYAGE_RERANK_MIN_REQUEST_GAP = rerankGap
-		VOYAGE_RERANK_RETRY_BACKOFF = rerankBackoff
 	})
 }
 

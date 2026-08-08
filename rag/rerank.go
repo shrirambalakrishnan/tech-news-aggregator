@@ -34,11 +34,12 @@ import (
 // Knobs for arm 4's rerank stage.
 var (
 	// RERANK_CANDIDATES_PER_STORY is a COUNT of chunks per story handed to the
-	// cross-encoder, >= RERANK_TOP_K_PER_STORY. Bounded by the assumed 10K
-	// tokens/min rerank budget: 6 chunks of ~800 words is ~7.9K tokens, 79% of
-	// the minute, which is where the ~52s pacing per story comes from. Raising
-	// it raises the pacing delay — and so the run's wall clock — roughly
-	// linearly.
+	// cross-encoder, >= RERANK_TOP_K_PER_STORY. Bounded by the 10K tokens/min
+	// account budget: 6 chunks of ~800 words is ~7.9K tokens, 79% of the
+	// minute, which is where the ~52s pacing per story comes from. Raising it
+	// raises the pacing delay — and so the run's wall clock — roughly linearly.
+	// 6 chunks + 1 title is also the shape the /v1/rerank rate-limit probe was
+	// run at, so this value is where the pacing is known to hold.
 	RERANK_CANDIDATES_PER_STORY = 6
 
 	// RERANK_TOP_K_PER_STORY is a COUNT of chunks kept per story after

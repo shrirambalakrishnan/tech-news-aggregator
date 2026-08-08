@@ -13,8 +13,16 @@ import (
 //
 //  1. planBatches   — split the work so no single request blows the budget
 //  2. pacingDelay   — sleep between requests so the per-minute rates hold
-//  3. retry + backoff (embedBatchWithRetry) — the backstop when 1+2 still
-//     land a 429, since token counts are only estimated
+//  3. retry + backoff (retryOn429) — the backstop when 1+2 still land a 429,
+//     since token counts are only estimated
+//
+// ONE set of constants covers BOTH endpoints, embeddings and rerank, because
+// the throttle is the ACCOUNT's rather than the endpoint's: 3 RPM / 10K TPM was
+// measured on embeddings and confirmed by probe on /v1/rerank at the shape arm 4
+// sends (6 chunks + 1 title), where the paced ~52s behaved as predicted. Same
+// limits, same confidence — so a parallel VOYAGE_RERANK_* set would be four
+// constants holding these same values, and a second place to forget when the
+// account tier changes.
 //
 // The 200M free-token allowance still applies, so staying under these limits
 // keeps the whole corpus embed ~free. These are mutable package vars so tests
@@ -28,27 +36,7 @@ var (
 	VOYAGE_MIN_REQUEST_GAP      = 20 * time.Second // >= this between requests => <= 3 RPM
 	VOYAGE_RATE_SAFETY          = 1.10             // pad token-paced sleeps for estimate error
 	VOYAGE_MAX_RETRIES          = 6
-	VOYAGE_RETRY_BACKOFF        = 30 * time.Second // grows linearly per attempt
-)
-
-// Rerank knobs. Separate constants from the embeddings ones above, not because
-// the formulas differ - they are shared (paceFor, retryOn429) - but because the
-// budgets are per endpoint and the observed numbers are not the same.
-//
-// ⚠️ The limits below are ASSUMED, not measured. Voyage documents rerank-2.5 at
-// 2000 RPM / 2M TPM for "Tier 1" (payment method added) and documents no
-// no-payment tier at all. The 3 RPM / 10K TPM figures this repo works to were
-// observed on the EMBEDDINGS endpoint; whether rerank shares that throttle is
-// unverified. We pace conservatively anyway, because the cost of being wrong is
-// asymmetric: too slow wastes wall clock, too fast wastes a paid Claude run that
-// dies partway through. These are mutable vars precisely so that if a 429 never
-// appears the pacing can be dropped without a code change - the difference
-// between a ~5-hour and a ~5-minute `eval 4`.
-var (
-	VOYAGE_RERANK_TPM_LIMIT       = 10000            // tokens per minute assumed for rerank (unverified; see above)
-	VOYAGE_RERANK_MIN_REQUEST_GAP = 20 * time.Second // >= this between rerank requests => <= 3 RPM
-	VOYAGE_RERANK_MAX_RETRIES     = 6
-	VOYAGE_RERANK_RETRY_BACKOFF   = 60 * time.Second // grows linearly per attempt (1min, 2min, 3min, ...)
+	VOYAGE_RETRY_BACKOFF        = 60 * time.Second // grows linearly per attempt (1min, 2min, 3min, ...)
 )
 
 // sleep is the seam every wait in this package goes through (the repo-wide
@@ -102,40 +90,30 @@ func planBatches(texts []string, maxTokens, maxCount int) [][]string {
 	return batches
 }
 
-// paceFor returns how long to wait after sending a request costing tokens
-// against a budget of tpmLimit tokens per minute. A request of N tokens uses
-// N/tpmLimit of that budget, so sleeping the same fraction of 60s keeps the
-// rolling token rate under the cap (padded by VOYAGE_RATE_SAFETY since N is only
-// an estimate). The result is floored at minGap, which independently keeps the
+// pacingDelay returns how long to wait after sending a request costing
+// requestTokens. A request of N tokens uses N/VOYAGE_TPM_LIMIT of the per-minute
+// token budget, so sleeping that same fraction of 60s keeps the rolling token
+// rate under the cap (padded by VOYAGE_RATE_SAFETY since N is only an estimate).
+// The result is floored at VOYAGE_MIN_REQUEST_GAP, which independently keeps the
 // request rate under the requests-per-minute cap.
 //
-// One formula, two sets of constants: the embeddings and rerank endpoints have
-// different budgets but the same arithmetic, and a second copy of it is a second
-// place for the safety pad to be forgotten.
-func paceFor(tokens, tpmLimit int, minGap time.Duration) time.Duration {
-	d := time.Duration(float64(tokens) / float64(tpmLimit) * 60.0 * VOYAGE_RATE_SAFETY * float64(time.Second))
-	if d < minGap {
-		d = minGap
+// Both endpoints pace through this one function, because the throttle is the
+// account's rather than the endpoint's. What differs between them is only the
+// token count handed in: a batch of documents for embeddings, one query plus its
+// documents for rerank (rerankTokens). At rag.RERANK_CANDIDATES_PER_STORY = 6
+// chunks of ~800 words that is ~7.9K tokens, 79% of the minute's budget, so
+// rerank returns ~52s and the TPM term - not the request gap - is what binds.
+func pacingDelay(requestTokens int) time.Duration {
+	d := time.Duration(float64(requestTokens) / float64(VOYAGE_TPM_LIMIT) * 60.0 * VOYAGE_RATE_SAFETY * float64(time.Second))
+	if d < VOYAGE_MIN_REQUEST_GAP {
+		d = VOYAGE_MIN_REQUEST_GAP
 	}
 	return d
 }
 
-// pacingDelay is paceFor against the embeddings endpoint's budget.
-func pacingDelay(batchTokens int) time.Duration {
-	return paceFor(batchTokens, VOYAGE_TPM_LIMIT, VOYAGE_MIN_REQUEST_GAP)
-}
-
-// rerankPacingDelay is paceFor against the rerank endpoint's budget. At
-// rag.RERANK_CANDIDATES_PER_STORY = 6 chunks of ~800 words the request costs
-// ~7.9K tokens, 79% of the assumed 10K/min, so this returns ~52s and the TPM
-// term - not VOYAGE_RERANK_MIN_REQUEST_GAP - is what binds.
-func rerankPacingDelay(tokens int) time.Duration {
-	return paceFor(tokens, VOYAGE_RERANK_TPM_LIMIT, VOYAGE_RERANK_MIN_REQUEST_GAP)
-}
-
 // rerankTokens estimates what one rerank request costs against the token budget:
 // the query plus every document, since the cross-encoder reads the pair. This is
-// the number rerankPacingDelay is computed from.
+// the number pacingDelay is computed from on the rerank path.
 func rerankTokens(query string, documents []string) int {
 	tokens := estimateTokens(query)
 	for _, d := range documents {

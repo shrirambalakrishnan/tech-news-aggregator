@@ -549,16 +549,15 @@ the retrieval layer via `calibrate-floor` is free); then reranking — now wired
 | `eval 4` (341 stories, 12 batches) | 341 rerank + 12 embed + 12 Claude | $0.00 Voyage (~2.7M tokens against the 200M free allowance), ~$0.29 Claude | ~5 h |
 
 Both wall-clock figures are dominated by **pacing, not compute**: ~52s between
-rerank calls, from 6 chunks × ~800 words ≈ 7.9K tokens against an assumed 10K
+rerank calls, from 6 chunks × ~800 words ≈ 7.9K tokens against the 10K
 tokens/min budget.
 
-> ⚠️ **That budget is assumed, not verified.** Voyage documents `rerank-2.5` at
-> 2000 RPM / 2M TPM for Tier 1 ("payment method added") and documents no
-> no-payment tier at all. The 3 RPM / 10K TPM this repo works to was observed on
-> the **embeddings** endpoint. The pacing constants are mutable package vars
-> (`VOYAGE_RERANK_TPM_LIMIT`, `VOYAGE_RERANK_MIN_REQUEST_GAP`) precisely so that
-> if a 429 never appears they can be relaxed without a code change — the
-> difference between a ~5-hour and a ~5-minute `eval 4`.
+The rerank endpoint reuses the **same** rate-limit policy as embeddings —
+`VOYAGE_TPM_LIMIT`, `VOYAGE_MIN_REQUEST_GAP`, `VOYAGE_MAX_RETRIES`,
+`VOYAGE_RETRY_BACKOFF` — because the 3 RPM / 10K TPM throttle is the account's,
+not the endpoint's: it was measured on embeddings and confirmed by probe on
+`/v1/rerank` at arm 4's own request shape (6 chunks + 1 title). The only
+per-endpoint difference is the token count fed to `pacingDelay`.
 
 **The baseline is the recorded no-floor arm 3 row (19 / 76 / 230 / 16), by
 choice.** At HEAD arm 3 runs at 7.1 excerpts per call; arm 4 takes 2 chunks from

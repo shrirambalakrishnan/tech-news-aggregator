@@ -45,7 +45,7 @@ func Rerank(query string, documents []string, topK int) ([]RerankResult, error) 
 		var err error
 		results, err = rerankBatch(query, documents, topK)
 		return err
-	}, VOYAGE_RERANK_MAX_RETRIES, VOYAGE_RERANK_RETRY_BACKOFF)
+	}, VOYAGE_MAX_RETRIES, VOYAGE_RETRY_BACKOFF)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,7 @@ func RerankMany(queries []string, documents [][]string, topK int) ([][]RerankRes
 		all = append(all, results)
 
 		if i < len(queries)-1 {
-			sleep(rerankPacingDelay(tokens))
+			sleep(pacingDelay(tokens))
 		}
 	}
 	return all, nil

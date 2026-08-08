@@ -131,21 +131,22 @@ func TestRerankManyPacesBetweenCallsOnly(t *testing.T) {
 		t.Errorf("slept %d times for 3 calls, want 2 (between calls, none after the last): %v", len(*slept), *slept)
 	}
 	for _, d := range *slept {
-		if d != rerankPacingDelay(rerankTokens("one", []string{"a"})) {
-			t.Errorf("paced %s, want the rerank endpoint's delay for the request just sent", d)
+		if d != pacingDelay(rerankTokens("one", []string{"a"})) {
+			t.Errorf("paced %s, want the delay for the request just sent", d)
 		}
 	}
 }
 
-// TestRerankManyPacesOnTheRerankBudget: the delay must come from the rerank
-// constants, not the embeddings ones. They happen to hold the same numbers
-// today, so only a test that moves one of them can tell which was read.
-func TestRerankManyPacesOnTheRerankBudget(t *testing.T) {
+// TestRerankManyPacesOnTheSharedBudget: rerank must pace through the same knobs
+// the embeddings path uses - the throttle is the account's, not the endpoint's.
+// Moving one proves rerank actually reads it rather than carrying a private copy
+// that happens to hold the same number.
+func TestRerankManyPacesOnTheSharedBudget(t *testing.T) {
 	slept := recordSleeps(t)
 
-	gap := VOYAGE_RERANK_MIN_REQUEST_GAP
-	VOYAGE_RERANK_MIN_REQUEST_GAP = 99 * time.Second
-	defer func() { VOYAGE_RERANK_MIN_REQUEST_GAP = gap }()
+	gap := VOYAGE_MIN_REQUEST_GAP
+	VOYAGE_MIN_REQUEST_GAP = 99 * time.Second
+	defer func() { VOYAGE_MIN_REQUEST_GAP = gap }()
 
 	stubRerank(t, func(query string, documents []string, topK int) ([]RerankResult, error) {
 		return []RerankResult{{Index: 0, RelevanceScore: 1}}, nil
@@ -155,7 +156,7 @@ func TestRerankManyPacesOnTheRerankBudget(t *testing.T) {
 		t.Fatalf("RerankMany returned error: %v", err)
 	}
 	if len(*slept) != 1 || (*slept)[0] != 99*time.Second {
-		t.Errorf("slept %v, want one 99s gap from the rerank floor", *slept)
+		t.Errorf("slept %v, want one 99s gap from the shared request-gap floor", *slept)
 	}
 }
 
@@ -178,7 +179,7 @@ func TestRerankRetriesOnRateLimit(t *testing.T) {
 	// The default schedule is 1min/2min/3min, which no test can afford to
 	// observe, so the sleeps are zeroed and the growth is asserted separately in
 	// TestRetryOn429BacksOffLinearly against the shared helper.
-	defaultBackoff := VOYAGE_RERANK_RETRY_BACKOFF
+	defaultBackoff := VOYAGE_RETRY_BACKOFF
 	noPacing(t)
 
 	calls := 0
@@ -201,16 +202,15 @@ func TestRerankRetriesOnRateLimit(t *testing.T) {
 		t.Errorf("expected 4 calls (3 rate-limited + 1 success), got %d", calls)
 	}
 
-	// The shipped unit is the issue's 1 minute, deliberately different from the
-	// embeddings endpoint's 30s.
+	// The shipped unit is 1 minute, for both endpoints.
 	if defaultBackoff != time.Minute {
-		t.Errorf("VOYAGE_RERANK_RETRY_BACKOFF = %s, want 1m", defaultBackoff)
+		t.Errorf("VOYAGE_RETRY_BACKOFF = %s, want 1m", defaultBackoff)
 	}
 }
 
 // TestRetryOn429BacksOffLinearly pins the schedule both endpoints share: the nth
-// retry waits n times the unit — 1min, 2min, 3min at the rerank endpoint's
-// shipped 60s. Asserted from the durations requested, so it costs no wall clock.
+// retry waits n times the unit — 1min, 2min, 3min at the shipped 60s. Asserted
+// from the durations requested, so it costs no wall clock.
 func TestRetryOn429BacksOffLinearly(t *testing.T) {
 	slept := recordSleeps(t)
 
@@ -228,10 +228,10 @@ func TestRetryOn429BacksOffLinearly(t *testing.T) {
 }
 
 func TestRerankExhaustsRetries(t *testing.T) {
-	retries, backoff := VOYAGE_RERANK_MAX_RETRIES, VOYAGE_RERANK_RETRY_BACKOFF
-	VOYAGE_RERANK_MAX_RETRIES = 2
-	VOYAGE_RERANK_RETRY_BACKOFF = 0
-	defer func() { VOYAGE_RERANK_MAX_RETRIES, VOYAGE_RERANK_RETRY_BACKOFF = retries, backoff }()
+	retries, backoff := VOYAGE_MAX_RETRIES, VOYAGE_RETRY_BACKOFF
+	VOYAGE_MAX_RETRIES = 2
+	VOYAGE_RETRY_BACKOFF = 0
+	defer func() { VOYAGE_MAX_RETRIES, VOYAGE_RETRY_BACKOFF = retries, backoff }()
 
 	calls := 0
 	stubRerank(t, func(query string, documents []string, topK int) ([]RerankResult, error) {
@@ -303,22 +303,12 @@ func TestRerankTokensCountsQueryAndDocuments(t *testing.T) {
 	}
 }
 
-// TestRerankPacingDelayMatchesTheIssuesFigure checks the ~52s the arm's runtime
+// TestRerankPacingDelayMatchesTheProbedFigure checks the ~52s the arm's runtime
 // estimate is built on: 6 chunks of ~800 words is ~7.9K tokens, 79% of the
-// assumed 10K/min budget.
-func TestRerankPacingDelayMatchesTheIssuesFigure(t *testing.T) {
-	got := rerankPacingDelay(7859)
+// 10K/min budget — the shape the /v1/rerank probe was run at.
+func TestRerankPacingDelayMatchesTheProbedFigure(t *testing.T) {
+	got := pacingDelay(7859)
 	if got < 50*time.Second || got > 55*time.Second {
-		t.Errorf("rerankPacingDelay(7859) = %s, want ~52s (the figure the ~5h eval estimate assumes)", got)
-	}
-}
-
-func TestRerankPacingDelayFloorIsRequestGap(t *testing.T) {
-	gap := VOYAGE_RERANK_MIN_REQUEST_GAP
-	VOYAGE_RERANK_MIN_REQUEST_GAP = 5 * time.Second
-	defer func() { VOYAGE_RERANK_MIN_REQUEST_GAP = gap }()
-
-	if d := rerankPacingDelay(1); d != 5*time.Second {
-		t.Errorf("a tiny request should floor at the request gap, got %s", d)
+		t.Errorf("pacingDelay(7859) = %s, want ~52s (the figure the ~5h eval estimate is built on)", got)
 	}
 }
