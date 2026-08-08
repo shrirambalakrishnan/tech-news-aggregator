@@ -10,15 +10,24 @@ import (
 )
 
 // This file is the TRANSPORT layer: the wire shapes of Voyage's /v1/embeddings
-// endpoint and the single-request HTTP call. One batch in, one response out —
-// it knows nothing about batching plans, pacing, or retries (ratelimit.go),
-// except for flagging a 429 as a RateLimitError so the retry loop can react.
+// and /v1/rerank endpoints and their single-request HTTP calls. One request in,
+// one response out — it knows nothing about batching plans, pacing, or retries
+// (ratelimit.go), except for flagging a 429 as a RateLimitError so the retry
+// loop can react.
 
 const (
 	VOYAGE_EMBEDDINGS_URL      = "https://api.voyageai.com/v1/embeddings"
 	VOYAGE_EMBEDDING_MODEL     = "voyage-4-lite"
 	VOYAGE_INPUT_TYPE_DOCUMENT = "document"
 	VOYAGE_INPUT_TYPE_QUERY    = "query"
+
+	VOYAGE_RERANK_URL = "https://api.voyageai.com/v1/rerank"
+	// VOYAGE_RERANK_MODEL is the cross-encoder arm 4 scores (query, chunk) pairs
+	// with. Voyage's valid ids are rerank-2.5, rerank-2.5-lite, rerank-2,
+	// rerank-2-lite, rerank-1 and rerank-lite-1. It is recorded on every arm-4
+	// eval run record (rerank_model), so changing it re-bases those numbers and
+	// the records say so.
+	VOYAGE_RERANK_MODEL = "rerank-2.5"
 )
 
 type Request struct {
@@ -39,6 +48,101 @@ type Response struct {
 	Usage  struct {
 		TotalTokens int `json:"total_tokens"`
 	} `json:"usage"`
+}
+
+// RerankRequest is the wire shape of POST /v1/rerank. ReturnDocuments is sent
+// false: results are mapped back to chunks by Index, so echoing the document
+// text back would triple the response for nothing.
+type RerankRequest struct {
+	Model           string   `json:"model"`
+	Query           string   `json:"query"`
+	Documents       []string `json:"documents"`
+	TopK            int      `json:"top_k,omitempty"`
+	ReturnDocuments bool     `json:"return_documents"`
+}
+
+// RerankData is one scored document. Index is its position in the SUBMITTED
+// documents slice — the only thing tying a score back to the chunk it belongs
+// to, since the API returns results reordered and truncated to top_k.
+type RerankData struct {
+	Index          int     `json:"index"`
+	RelevanceScore float64 `json:"relevance_score"`
+}
+
+type RerankResponse struct {
+	Object string       `json:"object"`
+	Data   []RerankData `json:"data"`
+	Model  string       `json:"model"`
+	Usage  struct {
+		TotalTokens int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+// rerankHTTP scores documents against query in a single HTTP request, returning
+// at most topK results. Voyage returns them already sorted by descending
+// relevance score; that order is preserved rather than re-sorted here, since
+// re-sorting would hide a change in the API's contract instead of surfacing it.
+func rerankHTTP(query string, documents []string, topK int) ([]RerankResult, error) {
+	reqBody := RerankRequest{
+		Model:           VOYAGE_RERANK_MODEL,
+		Query:           query,
+		Documents:       documents,
+		TopK:            topK,
+		ReturnDocuments: false,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal error: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, VOYAGE_RERANK_URL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("request error: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("VOYAGE_API_KEY"))
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("post error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, &RateLimitError{Status: resp.Status, Body: string(body)}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status %s: %s", resp.Status, string(body))
+	}
+
+	var response RerankResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("decode error: %w", err)
+	}
+	return mapRerankData(response.Data, len(documents))
+}
+
+// mapRerankData converts the wire results to RerankResults, rejecting an index
+// that does not address a submitted document.
+//
+// The bounds check mirrors embedBatchHTTP's: the index is what the caller
+// indexes its own candidate slice with, so an out-of-range value has to become
+// an error here rather than a panic there. Split out of rerankHTTP so it can be
+// tested without a fake HTTP server.
+func mapRerankData(data []RerankData, documentCount int) ([]RerankResult, error) {
+	results := make([]RerankResult, 0, len(data))
+	for _, d := range data {
+		if d.Index < 0 || d.Index >= documentCount {
+			return nil, fmt.Errorf("rerank index %d out of range for %d documents", d.Index, documentCount)
+		}
+		results = append(results, RerankResult{Index: d.Index, RelevanceScore: d.RelevanceScore})
+	}
+	return results, nil
 }
 
 // embedBatchHTTP embeds one batch of texts in a single HTTP request, returning
