@@ -204,6 +204,35 @@ func rerankCandidateSets(sets []candidateSet) ([][]scoredChunk, error) {
 		documents = append(documents, texts)
 	}
 
+	// results is [][]RerankResult: one inner slice per query, in the SAME order
+	// as sets, each holding one result per document that query submitted, sorted
+	// by descending relevance score. RerankResult.Index is a position in THAT
+	// query's documents slice - i.e. in set.candidates - and not a position in
+	// the response, which is what the reordering below is all about.
+	//
+	// Worked example, 2 stories x 3 candidates (the real shape is
+	// RERANK_CANDIDATES_PER_STORY = 6). Going in:
+	//
+	//	queries[0]   = "Rewriting our scheduler in Rust"
+	//	documents[0] = ["rust ownership...",  "k8s scheduling...", "gc pauses..."]
+	//	                 ^ cosine rank 0        ^ cosine rank 1       ^ cosine rank 2
+	//
+	// Coming back:
+	//
+	//	results[0] = [{Index: 1, RelevanceScore: 0.91},   <- documents[0][1], "k8s scheduling..."
+	//	              {Index: 0, RelevanceScore: 0.44},   <- documents[0][0], "rust ownership..."
+	//	              {Index: 2, RelevanceScore: 0.02}]   <- documents[0][2], "gc pauses..."
+	//	results[1] = [ ... same shape for the second story ... ]
+	//
+	// Read that as: the cross-encoder promoted the chunk cosine ranked SECOND to
+	// first place. results[0][0].Index is 1, not 0 - so indexing set.candidates
+	// by the loop counter instead of by result.Index would attach 0.91 to the
+	// wrong chunk, and the run would complete and score normally while doing it.
+	// That is the failure this whole index dance exists to prevent.
+	//
+	// With RERANK_TOP_K_PER_STORY = 2 the first two entries are kept ("k8s
+	// scheduling..." and "rust ownership...") and the third is logged and
+	// dropped.
 	results, err := rerankQueries(queries, documents)
 	if err != nil {
 		return nil, fmt.Errorf("failed to rerank retrieval candidates: %w", err)
