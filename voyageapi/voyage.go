@@ -15,7 +15,6 @@ package voyageapi
 import (
 	"fmt"
 	"log"
-	"time"
 )
 
 // embedBatch is the network seam (function-variable DI): it embeds a single
@@ -82,7 +81,7 @@ func embedAll(texts []string, inputType string) ([][]float32, error) {
 		// Pace between batches, not after the last one — the sleep protects the
 		// *next* request, and there isn't one.
 		if i < len(batches)-1 {
-			time.Sleep(pacingDelay(batchTokens))
+			pace("embed batch", batchTokens)
 		}
 	}
 	return embeddings, nil

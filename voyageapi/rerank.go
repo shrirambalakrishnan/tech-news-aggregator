@@ -135,7 +135,7 @@ func RerankMany(queries []string, documents [][]string) ([][]RerankResult, error
 		all = append(all, results)
 
 		if i < len(queries)-1 {
-			time.Sleep(pacingDelay(RERANK_TOKENS_PER_CALL))
+			pace("rerank request", RERANK_TOKENS_PER_CALL)
 		}
 	}
 	return all, nil
