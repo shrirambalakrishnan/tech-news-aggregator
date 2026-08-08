@@ -19,7 +19,7 @@ import (
 // real evalRuns/ directory to the console.
 var runEvalReportCommand = evalHarness.RunEvalReport
 
-// parseArm converts a CLI argument into an Arm. Only the valid arms (0-3) are
+// parseArm converts a CLI argument into an Arm. Only the valid arms (0-4) are
 // accepted; anything else errors so a typo can't silently fall through to a
 // default flow.
 func parseArm(s string) (hackernews_classifier.Arm, error) {
@@ -29,10 +29,11 @@ func parseArm(s string) (hackernews_classifier.Arm, error) {
 	}
 	switch hackernews_classifier.Arm(n) {
 	case hackernews_classifier.ArmGeneric, hackernews_classifier.ArmInterests,
-		hackernews_classifier.ArmRAG, hackernews_classifier.ArmRAGPerStory:
+		hackernews_classifier.ArmRAG, hackernews_classifier.ArmRAGPerStory,
+		hackernews_classifier.ArmRerank:
 		return hackernews_classifier.Arm(n), nil
 	default:
-		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG, 3=RAG per-story)", n)
+		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG, 3=RAG per-story, 4=RAG per-story reranked)", n)
 	}
 }
 
@@ -52,7 +53,7 @@ func main() {
 //	go run . eval <arm> -> eval     (arm REQUIRED)
 //	go run . eval-report -> summarise the eval runs recorded so far
 //	go run . prebuild   -> prebuild
-//	go run . embed      -> build the corpus index the RAG arms retrieve from
+//	go run . embed      -> build the corpus index the retrieval arms (2, 3, 4) read
 //	go run . calibrate-floor -> pick rag.RETRIEVAL_SIMILARITY_FLOOR from measured scores
 func run(args []string) error {
 	godotenv.Load()
@@ -88,8 +89,8 @@ func runPrebuild() error {
 }
 
 // runEmbed chunks profile/corpus, embeds each chunk via Voyage, and writes
-// profile/corpus_index.json - the index the RAG arms (2 and 3) retrieve from. Run
-// occasionally, not every 4h; requires VOYAGE_API_KEY in env.
+// profile/corpus_index.json - the index the retrieval arms (2, 3 and 4) read.
+// Run occasionally, not every 4h; requires VOYAGE_API_KEY in env.
 //
 // It then archives the index under evalRuns/ (issue #26). The eval flow archives
 // it too, so this is not what makes an index traceable - it is what makes it
@@ -150,7 +151,7 @@ func runCalibrateFloor() error {
 // that have already been paid for.
 func runEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG, 3=RAG per-story)")
+		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG, 3=RAG per-story, 4=RAG per-story reranked)")
 	}
 	arm, err := parseArm(args[0])
 	if err != nil {

@@ -25,6 +25,7 @@ import (
 var loadUserContext = profile.LoadUserContext
 var loadRagContext = rag.RetrieveContext
 var loadPooledRagContext = rag.RetrievePooledContext
+var loadRerankedRagContext = rag.RetrieveRerankedContext
 
 // BuildProfile returns the UserProfile the chosen arm classifies against, built
 // for THIS batch of stories.
@@ -39,6 +40,8 @@ var loadPooledRagContext = rag.RetrievePooledContext
 //     rag.RETRIEVAL_TOP_K (5) excerpts, arm 3 up to rag.RETRIEVAL_POOL_CAP (20) -
 //     so an eval delta between them is NOT attributable to selection alone. See
 //     rag.RetrievePooledContext for the confound and how to remove it.
+//   - ArmRerank      -> arm 3's retrieval with a cross-encoder rescoring each
+//     story's candidates before pooling. Same queries, same index, same cap.
 //
 // The stories are the retrieval query for both retrieval arms, which is why they
 // are a parameter rather than something the caller splices in afterwards: every
@@ -85,6 +88,18 @@ func BuildProfile(arm hackernews_classifier.Arm, stories []hackernews_classifier
 		excerpts, err := loadPooledRagContext(retrievalQueries(stories))
 		if err != nil {
 			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 3 (RAG per-story): corpus retrieval failed (run `go run . embed`): %w", err)
+		}
+		return hackernews_classifier.UserProfile{RetrievedExcerpts: excerpts}, nil
+
+	case hackernews_classifier.ArmRerank:
+		// The SAME retrieval key as arm 3 - one query per story, in batch order.
+		// That identity is the intended single variable between the two arms:
+		// they ask the same questions of the same index and differ only in how
+		// the answers are ranked (cosine vs a cross-encoder). If this ever
+		// diverges from arm 3's query, the comparison stops measuring reranking.
+		excerpts, err := loadRerankedRagContext(retrievalQueries(stories))
+		if err != nil {
+			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 4 (rerank): corpus retrieval failed (run `go run . embed`): %w", err)
 		}
 		return hackernews_classifier.UserProfile{RetrievedExcerpts: excerpts}, nil
 

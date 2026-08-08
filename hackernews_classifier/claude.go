@@ -34,6 +34,13 @@ const (
 	// rag.RETRIEVAL_TOP_K (5). That confound is upstream in armcontext/rag, not
 	// here, and is documented on rag.RetrievePooledContext.
 	ArmRAGPerStory Arm = 3
+	// ArmRerank classifies against the SAME kind of corpus excerpts as
+	// ArmRAGPerStory, retrieved with the same per-story queries against the same
+	// index, and differs from it in one place upstream: the per-story chunks are
+	// ranked by a cross-encoder instead of by cosine similarity. The prompt is
+	// shared with the other retrieval arms for the same reason arm 3 shares it -
+	// so no eval delta can come from prompt WORDING. See rag.RetrieveRerankedContext.
+	ArmRerank Arm = 4
 )
 
 type StoryDetail struct {
@@ -57,11 +64,12 @@ type UserProfile struct {
 	// (sending the whole corpus every 4h is the cost Approach 3 exists to
 	// avoid). Unlike Summary/Interests, which are built once per run, this is
 	// per classify call - the retrieval query is the batch's own titles.
-	// Only ArmRAG and ArmRAGPerStory read it, and they read it identically: the
-	// arm, not this field's emptiness, selects the prompt, so each arm builds
-	// from exactly one context source and the arms stay comparable in the eval.
-	// The two differ only in how the caller filled this slice - ArmRAG from one
-	// blended query, ArmRAGPerStory from per-story queries pooled together.
+	// Only the retrieval arms read it, and they read it identically: the arm,
+	// not this field's emptiness, selects the prompt, so each arm builds from
+	// exactly one context source and the arms stay comparable in the eval. They
+	// differ only in how the caller filled this slice - ArmRAG from one blended
+	// query, ArmRAGPerStory from per-story queries pooled together, ArmRerank
+	// from the same per-story queries with a cross-encoder deciding the ranking.
 	RetrievedExcerpts []string
 }
 
@@ -80,23 +88,24 @@ var claudeMessageApiCall = claudeapi.ClaudeMessageApiCall
 // ConstructPromptSystemAttribute builds the classifier system prompt for the
 // chosen arm: ArmGeneric returns the static "technical computer science"
 // ruleset, ArmInterests classifies against the user's distilled interest
-// profile, and ArmRAG/ArmRAGPerStory classify against corpus excerpts retrieved
-// for the current batch. The arm drives the flow explicitly - neither the
-// profile's emptiness nor the presence of corpus chunks selects it - so each
-// prompt is built from exactly one context source and the arms stay comparable.
+// profile, and the retrieval arms (ArmRAG, ArmRAGPerStory, ArmRerank) classify
+// against corpus excerpts retrieved for the current batch. The arm drives the
+// flow explicitly - neither the profile's emptiness nor the presence of corpus
+// chunks selects it - so each prompt is built from exactly one context source
+// and the arms stay comparable.
 //
-// ArmRAG and ArmRAGPerStory share a branch on purpose: how the excerpts were
-// chosen happens upstream in armcontext, and giving arm 3 its own prompt would
-// make any eval delta unattributable between "per-story retrieval helped" and
-// "we happened to write a better prompt". Sharing the branch rules out prompt
-// wording as an explanation - it does NOT rule out prompt size, which differs
-// between the arms because they inject different numbers of excerpts (see
-// rag.RetrievePooledContext).
+// The retrieval arms share a branch on purpose: how the excerpts were chosen
+// happens upstream in armcontext and rag, and giving an arm its own prompt would
+// make any eval delta unattributable between "this retrieval strategy helped"
+// and "we happened to write a better prompt". Sharing the branch rules out
+// prompt wording as an explanation - it does NOT rule out prompt size, which
+// differs between the arms because they inject different numbers of excerpts
+// (see rag.RetrievePooledContext).
 func ConstructPromptSystemAttribute(arm Arm, profile UserProfile) string {
 	switch arm {
 	case ArmInterests:
 		return interestsClassificationPrompt(profile)
-	case ArmRAG, ArmRAGPerStory:
+	case ArmRAG, ArmRAGPerStory, ArmRerank:
 		return ragClassificationPrompt(profile.RetrievedExcerpts)
 	default:
 		return staticClassificationPrompt()

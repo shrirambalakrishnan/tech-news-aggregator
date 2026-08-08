@@ -101,7 +101,8 @@ func archiveIfAbsent(subdir, srcPath string) (string, error) {
 // attach a provenance claim to something they did not read.
 func armUsesCorpusIndex(arm hackernews_classifier.Arm) bool {
 	switch arm {
-	case hackernews_classifier.ArmRAG, hackernews_classifier.ArmRAGPerStory:
+	case hackernews_classifier.ArmRAG, hackernews_classifier.ArmRAGPerStory,
+		hackernews_classifier.ArmRerank:
 		return true
 	default:
 		return false

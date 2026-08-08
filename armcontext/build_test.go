@@ -30,11 +30,16 @@ func stubLoaders(t *testing.T) {
 		t.Fatalf("this arm must not retrieve pooled corpus context")
 		return nil, nil
 	}
+	loadRerankedRagContext = func(queries []string) ([]string, error) {
+		t.Fatalf("this arm must not retrieve reranked corpus context")
+		return nil, nil
+	}
 
 	t.Cleanup(func() {
 		loadUserContext = profile.LoadUserContext
 		loadRagContext = rag.RetrieveContext
 		loadPooledRagContext = rag.RetrievePooledContext
+		loadRerankedRagContext = rag.RetrieveRerankedContext
 	})
 }
 
@@ -188,6 +193,51 @@ func TestBuildProfileArmRAGPerStory(t *testing.T) {
 		}
 
 		_, err := BuildProfile(hackernews_classifier.ArmRAGPerStory, testStories)
+		if err == nil {
+			t.Fatal("expected an error when retrieval fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "embed") {
+			t.Errorf("error should point at the fix (`go run . embed`), got %q", err)
+		}
+	})
+}
+
+func TestBuildProfileArmRerank(t *testing.T) {
+	t.Run("uses arm 3's retrieval key", func(t *testing.T) {
+		stubLoaders(t)
+		var gotQueries []string
+		loadRerankedRagContext = func(queries []string) ([]string, error) {
+			gotQueries = queries
+			return []string{"chunk about raft"}, nil
+		}
+
+		p, err := BuildProfile(hackernews_classifier.ArmRerank, testStories)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Arms 3 and 4 must ask the SAME questions of the same index - that
+		// identity is what makes the ranking the only variable between them. If
+		// these queries ever diverge, the comparison stops measuring reranking.
+		want := retrievalQueries(testStories)
+		if !reflect.DeepEqual(gotQueries, want) {
+			t.Errorf("retrieval queries = %v, want arm 3's key %v", gotQueries, want)
+		}
+		if len(p.RetrievedExcerpts) != 1 || p.RetrievedExcerpts[0] != "chunk about raft" {
+			t.Errorf("expected the reranked chunks on the profile, got %+v", p.RetrievedExcerpts)
+		}
+		if p.Summary != "" || len(p.Interests) != 0 {
+			t.Errorf("arm 4 must carry no distilled context, got %+v", p)
+		}
+	})
+
+	t.Run("errors when retrieval fails", func(t *testing.T) {
+		stubLoaders(t)
+		loadRerankedRagContext = func(queries []string) ([]string, error) {
+			return nil, errors.New("corpus index unavailable")
+		}
+
+		_, err := BuildProfile(hackernews_classifier.ArmRerank, testStories)
 		if err == nil {
 			t.Fatal("expected an error when retrieval fails, got nil")
 		}
