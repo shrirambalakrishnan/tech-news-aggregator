@@ -25,6 +25,7 @@ import (
 var loadUserContext = profile.LoadUserContext
 var loadRagContext = rag.RetrieveContext
 var loadPooledRagContext = rag.RetrievePooledContext
+var loadRerankedRagContext = rag.RetrieveRerankedContext
 
 // BuildProfile returns the UserProfile the chosen arm classifies against, built
 // for THIS batch of stories.
@@ -39,6 +40,12 @@ var loadPooledRagContext = rag.RetrievePooledContext
 //     rag.RETRIEVAL_TOP_K (5) excerpts, arm 3 up to rag.RETRIEVAL_POOL_CAP (20) -
 //     so an eval delta between them is NOT attributable to selection alone. See
 //     rag.RetrievePooledContext for the confound and how to remove it.
+//   - ArmRerank -> arm 3's retrieval with a cross-encoder reordering each
+//     story's candidates before pooling. It reuses retrievalQueries VERBATIM,
+//     which is the point: arms 3 and 4 ask the same questions of the same index
+//     and differ only in how the answers are ranked, so the ranking is the
+//     single variable. If that key ever diverges, the comparison stops measuring
+//     reranking.
 //
 // The stories are the retrieval query for both retrieval arms, which is why they
 // are a parameter rather than something the caller splices in afterwards: every
@@ -85,6 +92,18 @@ func BuildProfile(arm hackernews_classifier.Arm, stories []hackernews_classifier
 		excerpts, err := loadPooledRagContext(retrievalQueries(stories))
 		if err != nil {
 			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 3 (RAG per-story): corpus retrieval failed (run `go run . embed`): %w", err)
+		}
+		return hackernews_classifier.UserProfile{RetrievedExcerpts: excerpts}, nil
+
+	case hackernews_classifier.ArmRerank:
+		// Arm 3's retrieval key, verbatim - the same titles, one query each.
+		// What changes is downstream: a cross-encoder rescores each story's
+		// candidates before they are pooled, so the pool is ranked by relevance
+		// rather than cosine. Sharing this line is what makes the ranking the
+		// only difference between the arms.
+		excerpts, err := loadRerankedRagContext(retrievalQueries(stories))
+		if err != nil {
+			return hackernews_classifier.UserProfile{}, fmt.Errorf("arm 4 (RAG per-story + rerank): corpus retrieval failed (run `go run . embed`): %w", err)
 		}
 		return hackernews_classifier.UserProfile{RetrievedExcerpts: excerpts}, nil
 

@@ -30,11 +30,16 @@ func stubLoaders(t *testing.T) {
 		t.Fatalf("this arm must not retrieve pooled corpus context")
 		return nil, nil
 	}
+	loadRerankedRagContext = func(queries []string) ([]string, error) {
+		t.Fatalf("this arm must not retrieve reranked corpus context")
+		return nil, nil
+	}
 
 	t.Cleanup(func() {
 		loadUserContext = profile.LoadUserContext
 		loadRagContext = rag.RetrieveContext
 		loadPooledRagContext = rag.RetrievePooledContext
+		loadRerankedRagContext = rag.RetrieveRerankedContext
 	})
 }
 
@@ -188,6 +193,62 @@ func TestBuildProfileArmRAGPerStory(t *testing.T) {
 		}
 
 		_, err := BuildProfile(hackernews_classifier.ArmRAGPerStory, testStories)
+		if err == nil {
+			t.Fatal("expected an error when retrieval fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "embed") {
+			t.Errorf("error should point at the fix (`go run . embed`), got %q", err)
+		}
+	})
+}
+
+func TestBuildProfileArmRerank(t *testing.T) {
+	// Arm 4 must ask arm 3's questions - the same titles, one query each. That
+	// identity is the intended single variable between the arms: if this key
+	// ever diverges, the arm-3/arm-4 comparison stops measuring reranking and
+	// starts measuring two changes at once, which is the trap Approach 4 fell
+	// into. The rerank stage itself is tested in rag; this pins the wiring.
+	t.Run("reuses arm 3's retrieval key", func(t *testing.T) {
+		stubLoaders(t)
+		var gotRerankQueries, gotPooledQueries []string
+		loadRerankedRagContext = func(queries []string) ([]string, error) {
+			gotRerankQueries = queries
+			return []string{"chunk about raft", "chunk about spanner"}, nil
+		}
+		loadPooledRagContext = func(queries []string) ([]string, error) {
+			gotPooledQueries = queries
+			return nil, nil
+		}
+
+		p, err := BuildProfile(hackernews_classifier.ArmRerank, testStories)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Built by calling arm 3's own construction, so the two cannot drift
+		// apart through a copied-then-edited literal.
+		want := retrievalQueries(testStories)
+		if !reflect.DeepEqual(gotRerankQueries, want) {
+			t.Errorf("retrieval queries = %v, want arm 3's key %v", gotRerankQueries, want)
+		}
+		if gotPooledQueries != nil {
+			t.Errorf("arm 4 called arm 3's retrieval as well as its own: %v", gotPooledQueries)
+		}
+		if len(p.RetrievedExcerpts) != 2 || p.RetrievedExcerpts[0] != "chunk about raft" {
+			t.Errorf("expected the reranked pool on the profile, got %+v", p.RetrievedExcerpts)
+		}
+		if p.Summary != "" || len(p.Interests) != 0 {
+			t.Errorf("arm 4 must carry no distilled context, got %+v", p)
+		}
+	})
+
+	t.Run("errors when retrieval fails", func(t *testing.T) {
+		stubLoaders(t)
+		loadRerankedRagContext = func(queries []string) ([]string, error) {
+			return nil, errors.New("corpus index unavailable")
+		}
+
+		_, err := BuildProfile(hackernews_classifier.ArmRerank, testStories)
 		if err == nil {
 			t.Fatal("expected an error when retrieval fails, got nil")
 		}
