@@ -1,11 +1,15 @@
-// Package voyageapi is a thin client for the Voyage AI embeddings API,
-// mirroring claudeapi. It reads VOYAGE_API_KEY from the environment.
+// Package voyageapi is a thin client for two Voyage AI endpoints — embeddings
+// (/v1/embeddings) and rerank (/v1/rerank) — mirroring claudeapi. It reads
+// VOYAGE_API_KEY from the environment.
 //
-// The package is organized one file per layer:
+// The package is organized one file per layer; the second endpoint spreads
+// across the same layers rather than forming a parallel stack, because the rate
+// limits it must respect belong to the ACCOUNT, not to the endpoint:
 //
 //	voyage.go    — PUBLIC API: EmbedDocuments/EmbedQueries, the embedBatch DI seam
+//	rerank.go    — PUBLIC API: Rerank/RerankMany, the rerankBatch DI seam
 //	ratelimit.go — POLICY: free-tier batching, pacing, and retry rules
-//	client.go    — TRANSPORT: wire types + the single-request HTTP call
+//	client.go    — TRANSPORT: wire types + the single-request HTTP calls
 package voyageapi
 
 import (

@@ -28,7 +28,7 @@ var (
 	VOYAGE_MIN_REQUEST_GAP      = 20 * time.Second // >= this between requests => <= 3 RPM
 	VOYAGE_RATE_SAFETY          = 1.10             // pad token-paced sleeps for estimate error
 	VOYAGE_MAX_RETRIES          = 6
-	VOYAGE_RETRY_BACKOFF        = 30 * time.Second // grows linearly per attempt
+	VOYAGE_RETRY_BACKOFF        = 60 * time.Second // grows linearly per attempt (1min, 2min, 3min, ...)
 )
 
 // RateLimitError marks an HTTP 429 so the retry loop can back off and retry,
@@ -90,7 +90,7 @@ func pacingDelay(batchTokens int) time.Duration {
 }
 
 // embedBatchWithRetry calls embedBatch, retrying on 429s with linear backoff
-// (30s, 60s, 90s, ...). Only rate limits are retried — they are transient by
+// (1min, 2min, 3min, ...). Only rate limits are retried — they are transient by
 // definition (wait long enough and the budget refills); any other error is
 // returned immediately since retrying wouldn't change the outcome.
 func embedBatchWithRetry(texts []string, inputType string) ([][]float32, error) {
