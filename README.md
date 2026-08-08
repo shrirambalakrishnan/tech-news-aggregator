@@ -107,6 +107,62 @@ When the script tries to filter the interested news items
 	- `RETRIEVAL_TOP_K`, `cosineSimilarity`, `topKBySimilarity`, `RetrieveContext` and the arm 2 prompt are untouched
 	- The only production edit is a `note` case in `rag.inferType`, and even that is cosmetic — `Chunk.Type` is stamped at index-build time, never read by retrieval or ranking, and exists so the built index can be inspected with `jq`
 
+### Approach 6 - Rerank the retrieved chunks with a cross-encoder
+---
+
+#### The problem with cosine alone
+
+- Arms 2 and 3 rank chunks by cosine similarity between two vectors that **never
+  saw each other**
+	- A chunk's vector is computed at `embed` time, before any story exists, and
+	  compresses ~800 words into a single point — a topical *average*
+	- So a chunk whose relevance lives in one paragraph out of eight is averaged
+	  down by the other seven
+- `calibrate-floor` measured how weak that ranking is directly: AUC 0.659, d' 0.635
+  pre-notes — relevant and irrelevant stories' best-chunk scores overlap heavily
+
+#### Solution
+
+- Add a **second ranking stage** on top of arm 3's retrieval — arm `4`
+- A cross-encoder reads the story title and the chunk **together in one forward
+  pass**, so every token of the title can attend to every token of the chunk.
+  Nothing is averaged, and the score is produced for that specific pair
+- It cannot replace cosine, only follow it: a cross-encoder emits no reusable
+  vector, so it cannot be indexed and must run live for every (title, chunk) pair.
+  Scoring the whole index per story would cost 168 pairs instead of 6
+	- **Cosine narrows, the cross-encoder reorders**
+
+##### The flow, per story
+
+1. Cosine-select `RERANK_CANDIDATES_PER_STORY` (6) candidates — at a *permissive*
+   floor, since this stage is now about recall, not relevance
+2. Send (title, 6 chunks) to Voyage `/v1/rerank` with `rerank-2.5`
+3. Keep the top `RERANK_TOP_K_PER_STORY` (2) by relevance score
+4. Pool, dedupe and cap exactly as arm 3 does — `poolChunks` is unchanged, so the
+   pool is now ordered by cross-encoder score instead of cosine
+
+##### What is deliberately identical to arm 3
+
+Same corpus, same index, same queries (the batch's titles, one per story), same
+`poolChunks`, same `RETRIEVAL_POOL_CAP`, same prompt, and the **same number of
+chunks kept per story** — so the ranking is the single variable, and the
+excerpt-volume confound that spoiled the arm 2 vs arm 3 comparison does not apply
+between arms 3 and 4.
+
+##### Cost and runtime
+
+| | `eval 4` (341 stories, 12 Claude calls) | production run (30 stories) |
+|--|--|--|
+| Voyage rerank calls | 341 | 30 |
+| Wall clock | **~5 hours** | ~26 min |
+| Voyage cost | $0.00 (free tier) | $0.00 |
+| Claude cost | ~$0.29 | ~$0.001 |
+
+The wall clock is entirely pacing: one cross-encoder call scores one query, so N
+stories cost N requests, and each is ~7.9K tokens against the free tier's 10K/min
+— about 52s apart. Adding a payment method on the Voyage dashboard lifts the
+throttle and the pacing becomes harmless overhead.
+
 ## Run modes (arms)
 
 - The classifier flow is selected **explicitly** by an `arm` argument.
@@ -119,6 +175,7 @@ When the script tries to filter the interested news items
 | `1` | `summary` + `interests` from `profile/user_context.json` | interests injected into the prompt | the distilled JSON is missing (run `prebuild` first) |
 | `2` | top-k corpus excerpts retrieved for the batch being classified | excerpts inlined into the prompt as evidence of the reader's interests | `profile/corpus_index.json` is missing, or retrieval fails (run `embed` first) |
 | `3` | corpus excerpts retrieved **per story** and pooled, capped at `RETRIEVAL_POOL_CAP` | same prompt *template*, corpus and index as arm 2; excerpt *selection* differs — and so does excerpt **count** (up to 20 vs arm 2's 5), see the confound note below | same as arm 2 |
+| `4` | the same per-story excerpts, **reranked by a cross-encoder** before pooling | same prompt template, corpus, index and queries as arm 3; only the *ranking* differs — cosine narrows to 6 candidates per story, `rerank-2.5` reorders them, top 2 are kept. Volume-matched to arm 3 by construction | same as arm 2, plus a `/v1/rerank` failure |
 
 ```bash
 # Approach 1
@@ -139,6 +196,10 @@ go run . eval 2         # eval under arm 2 — slow on Voyage's free tier, see b
 go run . calibrate-floor > scores.csv   # measure rag.RETRIEVAL_SIMILARITY_FLOOR (free, no Claude call)
 go run . 3              # normal run, arm 3 (RAG, per-story retrieval)
 go run . eval 3         # eval under arm 3 — same free-tier throttling as arm 2
+
+# Approach 6 — reranking on top of RAG
+go run . 4              # normal run, arm 4 (RAG per-story + cross-encoder rerank)
+go run . eval 4         # eval under arm 4 — ~5 HOURS on Voyage's free tier, see below
 
 # Approach 5 — reading notes in the corpus (arm 2)
 go run . embed          # picks up notes-*.md with no other wiring
@@ -313,6 +374,7 @@ other row was measured against the pre-notes index.
 | Arm 2 (RAG, blended query + notes) | 22 | 80 | 226 | 13 |
 | Arm 3 (RAG, per-story + notes) | 19 | 76 | 230 | 16 |
 | Arm 3 (RAG, per-story + notes + similarity_floor) | 19 | 83 | 223 | 16 |
+| Arm 4 (RAG, per-story + notes + rerank) | — | — | — | — |
 
 #### Metrics
 
@@ -325,6 +387,7 @@ other row was measured against the pre-notes index.
 | Arm 2 (RAG, blended query + notes) | 0.2157 | 0.6286 |
 | Arm 3 (RAG, per-story + notes) | 0.2000 | 0.5429 |
 | Arm 3 (RAG, per-story + notes + similarity_floor) | 0.1863 | 0.5429 |
+| Arm 4 (RAG, per-story + notes + rerank) | — | — |
 
 #### Reading the results
 
@@ -491,8 +554,43 @@ arm 2 vs arm 3 re-run above (~$0.16 total, and the only way to attribute that
 delta — note it must be re-run against the post-notes index, since arm 3's tabled
 numbers are now stale); then smaller chunks (currently 800 words — a ~9-word
 title averaged against an 800-word window dilutes the signal, and re-testing at
-the retrieval layer via `calibrate-floor` is free); then reranking — evaluated
-first as a scoring function (AUC on a subsample) before any arm is wired.
+the retrieval layer via `calibrate-floor` is free); then reranking — **now built
+as arm 4, see below**.
+
+#### Arm 4 (reranking) is built but NOT measured
+
+The arm-4 row above is blank on purpose. Nothing about reranking has been scored;
+`go run . eval 4` has not been run. Do not read the row as a null result.
+
+**Its baseline is the `Arm 3 (RAG, per-story + notes)` row — 19 / 76 / 230 / 16,
+precision 0.2000, recall 0.5429 — not the floored row below it.** That is a
+deliberate choice about excerpt volume, the variable Approach 4 got caught by.
+Arm 4 uses a permissive candidate floor and keeps 2 chunks from each of ~30
+stories, so its pool should land near the no-floor arm 3 run's measured **18.9
+excerpts per call**; arm 3 *at HEAD*, with `RETRIEVAL_SIMILARITY_FLOOR` = 0.3330,
+runs at **7.1**. Comparing against the floored row would compare two things at
+once again.
+
+The cost of that choice: the comparison is **cross-commit and n=1 on both sides**.
+Re-running arm 3 volume-matched as a fresh baseline is the fix, and is worth
+paying for only if arm 4 lands near the acceptance line. If it is taken, the floor
+change must be **committed first** — `git_sha` on the run record is HEAD, not the
+working tree.
+
+**Check the logged pooled count before reading any delta.** Arm 4 logs
+`rag: arm 4 pooled N excerpts` per call. If N is not near 18.9, the comparison is
+not volume-matched and the delta is confounded — this document records twice that
+assuming a pool size instead of counting it produced a wrong conclusion.
+
+Issue #27's acceptance criteria (FP ≤ 76, precision ≥ 0.2000, recall ≥ 0.5429)
+*are* that baseline row exactly, so they are cleared by an exact tie. A result on
+the line means **"did not lose ground"**, not "beat arm 3". At 35 positives the
+standard error on recall is ~8pp, so anything under ~1 SE is noise.
+
+The run also dumps every kept (story, chunk) pair's cosine **and** rerank score to
+the log (`rag: rerank-score,...`). Those lines are the input to a future
+rerank-floor experiment — grab them from the run log before it is lost, since the
+alternative is paying for a second ~5h run.
 
 ## Setup
 
@@ -503,7 +601,7 @@ The project needs two secret API keys and one non-secret config value:
 | Name | Type | Used by | Where it lives |
 |------|------|---------|----------------|
 | `ANTHROPIC_API_KEY` | secret | All Approaches | macOS Keychain |
-| `VOYAGE_API_KEY` | secret | Approach 3 | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | Approach 3 (`/v1/embeddings`) and Approach 6 (`/v1/rerank`) | macOS Keychain |
 | `GITHUB_USERNAME` | non-secret | Approach 2 | `.env` (see `.env.example`) |
 
 ### How to initialize the API keys (macOS Keychain)?
