@@ -13,9 +13,10 @@ go run .                        # build + run, arm 0 (requires ANTHROPIC_API_KEY
 go run . 1                      # run under arm 1 (interests; needs prebuild's JSON)
 go run . 2                      # run under arm 2 (RAG, one blended query; needs embed's corpus index)
 go run . 3                      # run under arm 3 (RAG, per-story retrieval; needs embed's corpus index)
+go run . 4                      # run under arm 4 (RAG per-story + cross-encoder rerank; needs embed's corpus index)
 go run . prebuild               # extract GitHub interest profile -> profile/user_context.json (occasional)
 go run . embed                  # chunk+embed profile/corpus -> profile/corpus_index.json (requires VOYAGE_API_KEY; ~20 min on Voyage free tier)
-go run . eval 0                 # eval under a specific arm (arm is REQUIRED for eval; 0|1|2|3); writes a run record to evalRuns/
+go run . eval 0                 # eval under a specific arm (arm is REQUIRED for eval; 0|1|2|3|4); writes a run record to evalRuns/
 go run . eval-report            # read evalRuns/ back: every run, per-configuration mean ± spread, then per-story stability (free; no API call, writes nothing)
 go run . calibrate-floor        # measure rag.RETRIEVAL_SIMILARITY_FLOOR from the labelled set (free; requires VOYAGE_API_KEY)
 go test ./...                   # run all tests
@@ -30,7 +31,7 @@ CI (`.github/workflows/test.yml`) runs `go test ./...` on pushes/PRs to `main`. 
 | Name | Type | Read by | Where it lives |
 |------|------|---------|----------------|
 | `ANTHROPIC_API_KEY` | secret | `claudeapi` (`os.Getenv`) — every Claude call | macOS Keychain |
-| `VOYAGE_API_KEY` | secret | `voyageapi` (`os.Getenv`) — the `embed` and `calibrate-floor` steps, and every arm 2/3 run | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | `voyageapi` (`os.Getenv`) — the `embed` and `calibrate-floor` steps, and every arm 2/3/4 run (arm 4 also calls `/v1/rerank`) | macOS Keychain |
 | `GITHUB_USERNAME` | non-secret | `profile/github.go` (`os.Getenv`) — whose READMEs to fetch | `.env` (see `.env.example`) |
 
 For local runs export the keys directly; in production `tech-news-run.sh` fetches secrets from the macOS Keychain (`security find-generic-password -a "$USER" -s <NAME> -w`) and exports them before `go run .`. **The runner exports only `ANTHROPIC_API_KEY`** — `VOYAGE_API_KEY` is needed only by the one-off `go run . embed` step (not the 4-hourly run), so export it manually for that: `export VOYAGE_API_KEY=$(security find-generic-password -a "$USER" -s VOYAGE_API_KEY -w)`. See README.md for the Keychain + launchd install steps.
@@ -42,8 +43,10 @@ explicit `arm` argument, not by what happens to be on disk. `main.parseArm`
 validates the CLI arg; `arm 0` = generic/static prompt with no profile (the
 production default, kept for cron-safety), `arm 1` = interests injected from the
 distilled JSON, `arm 2` = RAG with one query blended from the batch's titles,
-`arm 3` = RAG with one query **per story**, pooled (both retrieve from the embed
-step's index and are live in **both** the classify path and `evalHarness`).
+`arm 3` = RAG with one query **per story**, pooled, `arm 4` = arm 3's retrieval
+with a **cross-encoder reranking** each story's candidates before pooling (all
+three retrieve from the embed step's index and are live in **both** the classify
+path and `evalHarness`).
 Arms 2 and 3 share the same corpus, index and prompt template, so an eval delta
 between them cannot come from prompt **wording**. They were *intended* to differ
 in excerpt **selection** only, but they also differ in excerpt **count** (arm 2
@@ -70,7 +73,9 @@ Pipeline (entry point `main.go` → `GetMyHackerNewsStories(arm)`):
 2. **`hackernews_classifier` package**: builds the system + message prompts and calls Claude to classify a `[]StoryDetail` (id + title), returning the IDs deemed technical. **All cumulated stories go to Claude in a single API call per run** — `FilterHackerNewsStoriesByTitle` flattens the whole fetched slice into one `ClassifyTechNewsStory` call; it is *not* batched by page. The Algolia page size (`HACKERNEWS_HITS_PER_PAGE`) only controls how many stories are *fetched*, not the Claude batch size; with the defaults the single call happens to carry ~30 stories. `ConstructPromptSystemAttribute(arm, UserProfile)` returns the hardcoded static ruleset (`staticClassificationPrompt`) for `arm 0` and the interests-injected prompt for `arm 1` — the arm selects the flow, not the profile's emptiness. `UserProfile` is the classifier's own slim input contract (signal fields only) — `armcontext` maps `profile.UserContext` into it, so the classifier never imports `profile`.
 3. **`claudeapi` package**: thin Anthropic Messages API client (`POST /v1/messages`). Model and request shape are hardcoded here (`ANTHROPIC_MODEL_NAME`).
 4. **`profile` package**: fetches a GitHub user's repos and their READMEs (`github.go`), then extracts an interest profile from them via the LLM and reads/writes `profile/user_context.json` (`context.go`). Wired in as a **prebuild step**: `go run . prebuild` calls `ExtractGithubProfile()` and exits; the normal run skips it.
-5. **`voyageapi` package** (Approach 3): thin Voyage AI embeddings client (`POST /v1/embeddings`), mirroring `claudeapi`. `EmbedDocuments([]string) ([][]float32, error)` token-batches inputs and **paces requests for Voyage's no-payment tier** (3 RPM / 10K TPM): token-bounded batches, an inter-request delay, and 429 retry-with-backoff (all tunable package vars). Reads `VOYAGE_API_KEY`. Organized **one file per layer**: `voyage.go` (PUBLIC API: `EmbedDocuments` + the `embedBatch` DI seam), `ratelimit.go` (POLICY: free-tier config vars, `planBatches`, `pacingDelay`, retry), `client.go` (TRANSPORT: wire types + `embedBatchHTTP`).
+5. **`voyageapi` package** (Approach 3): thin Voyage AI client, mirroring `claudeapi`, covering two endpoints. **Embeddings** (`POST /v1/embeddings`): `EmbedDocuments([]string) ([][]float32, error)` token-batches inputs and **paces requests for Voyage's no-payment tier** (3 RPM / 10K TPM): token-bounded batches, an inter-request delay, and 429 retry-with-backoff (all tunable package vars). **Rerank** (`POST /v1/rerank`, Approach 6): `Rerank`/`RerankMany` score (query, document) pairs with `VOYAGE_RERANK_MODEL` = `rerank-2.5`; `RerankMany` is arm 4's entrypoint and paces between calls (~52s at 6 chunks) — a cross-encoder scores one query per call, so N stories cost N requests and cannot be batched. Reads `VOYAGE_API_KEY`. Organized **one file per layer**, with the second endpoint spread across the same three rather than forming a parallel stack: `voyage.go` (PUBLIC API: `EmbedDocuments` + the `embedBatch` DI seam), `rerank.go` (PUBLIC API: `Rerank`/`RerankMany` + the `rerankBatch` seam), `ratelimit.go` (POLICY: per-endpoint config vars plus the shared `paceFor` and `retryOn429`, `planBatches`, and the `sleep` seam), `client.go` (TRANSPORT: wire types + `embedBatchHTTP`/`rerankHTTP`).
+
+   > ⚠️ **The rerank rate limits are ASSUMED, not measured.** Voyage documents `rerank-2.5` at 2000 RPM / 2M TPM for Tier 1 ("payment method added") and documents no no-payment tier at all; the 3 RPM / 10K TPM figures here were observed on the *embeddings* endpoint. `VOYAGE_RERANK_TPM_LIMIT` and `VOYAGE_RERANK_MIN_REQUEST_GAP` are mutable vars so that if a 429 never appears the pacing can be relaxed without a code change — the difference between a ~5-hour and a ~5-minute `eval 4`.
 6. **`rag` package** (Approach 3): organized **one file per pipeline stage** — `corpus.go` is the INPUT stage (`CORPUS_DIR`, `readCorpusFiles`, `inferType`; types are stamped at read time so later stages never inspect filenames); `chunk.go` is the TRANSFORM stage (pure `ChunkText(text, window, overlap)`, fixed-size word windows, 800/120); `index.go` is the OUTPUT stage (the `CorpusIndex` artifact: provenance metadata + `[]Chunk`, with `Write`/`LoadCorpusIndex`); `build.go` is the PIPELINE (the `embedDocuments` DI seam, `buildIndex`, and `BuildCorpusIndex()` orchestrating read `profile/corpus/` → chunk → embed → write `profile/corpus_index.json`); `retrieve.go` is the RETRIEVAL stage (pure `cosineSimilarity` + `topKBySimilarity`, and `RetrieveContext(query, k)` = load index → embed query via `voyageapi.EmbedQuery` → top-k chunk texts; `RETRIEVAL_TOP_K` = 5). `retrieve.go` also holds arm 3's per-story path:
 `RetrievePooledContext(queries)` embeds all queries in **one** Voyage request
 (`voyageapi.EmbedQueries`), takes `RETRIEVAL_TOP_K_PER_STORY` (2) chunks per
@@ -80,9 +85,15 @@ truncate to `RETRIEVAL_POOL_CAP` (20). The cap is what keeps arm 3 retrieval
 rather than long-context stuffing: without it the prompt grows with the batch
 size. `RETRIEVAL_SIMILARITY_FLOOR` ships at **0.0 and is inert** — see Approach 4
 below. `TopScoresPerQuery(queries, k)` exposes the raw scores for calibration
-without exporting `cosineSimilarity`. Wired as the **embed step**: `go run . embed`. Index is git-ignored (regenerable, like `user_context.json`), but under explicit arm selection a **missing index is fatal for arm 2** rather than fail-soft — see Approach 3 below. **Retrieval is wired into both the classify path and the eval arm.**
+without exporting `cosineSimilarity`. `rerank.go` is arm 4's retrieval stage:
+`RetrieveRerankedContext(queries)` runs the same per-story cosine selection,
+widened to `RERANK_CANDIDATES_PER_STORY` (6) at the permissive
+`RERANK_CANDIDATE_FLOOR` (0.0, **inert** — see Approach 6), hands each story's
+candidates to the cross-encoder via the `rerankQueries` DI seam, keeps
+`RERANK_TOP_K_PER_STORY` (2) by relevance score, and pools with the *unchanged*
+`poolChunks`. Wired as the **embed step**: `go run . embed`. Index is git-ignored (regenerable, like `user_context.json`), but under explicit arm selection a **missing index is fatal for arm 2** rather than fail-soft — see Approach 3 below. **Retrieval is wired into both the classify path and the eval arm.**
 
-7. **`armcontext` package**: the single place that answers "what does this arm classify against?". `BuildProfile(arm, stories)` switches on the arm — empty profile for arm 0, the distilled summary/interests for arm 1, the excerpts `rag.RetrieveContext` returns for arm 2, the pooled excerpts `rag.RetrievePooledContext` returns for arm 3 — and errors (never a degraded profile) when the arm's artifact is missing. `retrievalQuery` (unexported) owns arm 2's retrieval key: the batch's titles, newline-joined; `retrievalQueries` owns arm 3's: the same titles as a **slice**, one query each. That one-line difference is the arms' *intended* distinction — not their only one, since they also inject different excerpt counts (see Approach 4's confound note). It exists so `main` and `evalHarness` share one implementation instead of two copies that must be kept in sync for the eval's numbers to transfer; both reach it through a `buildProfileForArm` DI var, which is also what their tests swap (per-arm construction is tested once, in `armcontext`).
+7. **`armcontext` package**: the single place that answers "what does this arm classify against?". `BuildProfile(arm, stories)` switches on the arm — empty profile for arm 0, the distilled summary/interests for arm 1, the excerpts `rag.RetrieveContext` returns for arm 2, the pooled excerpts `rag.RetrievePooledContext` returns for arm 3, the reranked pool `rag.RetrieveRerankedContext` returns for arm 4 — and errors (never a degraded profile) when the arm's artifact is missing. `retrievalQuery` (unexported) owns arm 2's retrieval key: the batch's titles, newline-joined; `retrievalQueries` owns arm 3's: the same titles as a **slice**, one query each. **Arm 4 reuses `retrievalQueries` verbatim** — arms 3 and 4 ask the same questions of the same index and differ only in how the answers are ranked, which is what makes the ranking their single variable. That one-line difference is the arms' *intended* distinction — not their only one, since they also inject different excerpt counts (see Approach 4's confound note). It exists so `main` and `evalHarness` share one implementation instead of two copies that must be kept in sync for the eval's numbers to transfer; both reach it through a `buildProfileForArm` DI var, which is also what their tests swap (per-arm construction is tested once, in `armcontext`).
 
 Packages depend downward only: `main` → `hackernews_classifier` → `claudeapi`, `main` → `profile` → `claudeapi`, `main` → `rag` → `voyageapi`, and `main`/`evalHarness` → `armcontext` → `{hackernews_classifier, profile, rag}`.
 
@@ -140,7 +151,7 @@ The harness answers "how good is the classifier". It did not answer "good under 
 
 Every `go run . eval <arm>` now writes two files, both stemmed `<UTC timestamp>-arm-<N>` (= the `run_id`):
 
-- **`evalRuns/<run_id>.json`** (`evalHarness/runrecord.go`) — `run_id`, `arm`, `git_sha`, `dataset_hash`, `corpus_index_hash`, `model`, `metrics{tp,fp,tn,fn,precision,recall}`. `corpus_index_hash` uses `omitempty` and is **absent for arms 0 and 1**, which never load the index — an empty string would read as "used an empty index" rather than "did not use one".
+- **`evalRuns/<run_id>.json`** (`evalHarness/runrecord.go`) — `run_id`, `arm`, `git_sha`, `dataset_hash`, `corpus_index_hash`, `model`, `rerank_model`, `metrics{tp,fp,tn,fn,precision,recall}`. `corpus_index_hash` uses `omitempty` and is **absent for arms 0 and 1**, which never load the index — an empty string would read as "used an empty index" rather than "did not use one". `rerank_model` follows the same rule and is **absent for every arm but 4** (`armUsesReranker`), which also keeps arms 0-3 records byte-identical to those already on disk. It shipped *with* arm 4 rather than as a follow-up because records cannot be back-filled: the first time anyone tries `rerank-2.5-lite`, every arm-4 record written without it becomes permanently unattributable — the same shape of gap arm 1's un-hashed profile still has.
 - **`evalRuns/<run_id>.csv`** (`evalHarness/predictions.go`) — one row per dataset item: `run_id, story_id, title, label, predicted`. The JSON gives the counts, the CSV the per-story verdicts behind them; comparing two runs is a `join` on `story_id`. `predicted` comes from `predictedPositiveSet`, **shared with `Evaluate`**, so the rows cannot disagree with the matrix they sit beside — a test recomputes the confusion matrix from the CSV alone to hold that.
 
 **Artifact archiving (`evalHarness/artifacts.go`).** The dataset and `profile/corpus_index.json` both decide the numbers, and both are git-ignored and overwritten in place. Each run hashes them and copies them content-addressed to `evalRuns/datasets/<sha256>.json` and `evalRuns/corpus_index/<sha256>.json`, **write-if-absent** — repeat runs over unchanged inputs add nothing, and a changed input is stored *beside* the old one rather than replacing a snapshot an earlier record still points at. This is the automated version of the `cp profile/corpus_index.json profile/corpus_index.pre-notes.json` step Approach 5's run order relies on a human remembering.
@@ -148,7 +159,7 @@ Every `go run . eval <arm>` now writes two files, both stemmed `<UTC timestamp>-
 - **Hash = plain sha256 of raw file bytes**, so `shasum -a 256` reproduces it and there are no canonicalisation rules to get subtly wrong. Consequence: it covers the index's `generated_at`, so re-embedding an *unchanged* corpus yields a new hash and a second 4.4 MB copy. Accepted — re-embedding is a deliberate ~20-min act, and nothing rewrites the file between eval runs.
 - **Archiving runs BEFORE the first Claude call** and aborts on failure. It is free, so failing early costs nothing; failing after classification would leave an unrecordable run already paid for. Same no-fail-soft rule as issue #11 — a number nobody can trace to its data is the problem this exists to solve.
 - **`go run . embed` archives the index too** (`evalHarness.ArchiveCorpusIndex`, wired from `main.runEmbed`). Not what makes an index traceable — the eval flow does that — but what makes it traceable *early*: an index built today and first evaluated next week would otherwise be captured only at eval time, with any `embed` in between overwriting it unsnapshotted. `rag` cannot call this itself (`evalHarness` already imports `rag`, so the reverse edge is a cycle), which also keeps `rag` unaware eval tracking exists.
-- **`armUsesCorpusIndex` mirrors `armcontext.BuildProfile`'s retrieval cases** and must be updated alongside them. An arm that reads the index but is missing there records no `corpus_index_hash` and publishes numbers whose retrieval side is untraceable.
+- **`armUsesCorpusIndex` mirrors `armcontext.BuildProfile`'s retrieval cases** and must be updated alongside them. An arm that reads the index but is missing there records no `corpus_index_hash` and publishes numbers whose retrieval side is untraceable. **`armUsesReranker` is the same contract for the cross-encoder** and mirrors `rag.RetrieveRerankedContext`'s callers.
 
 **Ordering: report first, then record.** `RunEval` prints `metrics.Report()` *before* writing, and returns the write error afterwards. A run costs money and ~10 min, so a failed write earns a non-zero exit but must never cost the operator numbers already paid for. This is why `RunEval` returns an `error` instead of calling `log.Fatal` — which also restores `main.go`'s stated "exactly one exit point" design. Both artifacts are written independently (errors joined) and share **one** `run_id` computed at the top of `RunEval`: two independent timestamps seconds apart can straddle a second boundary and leave a `.json` and `.csv` that no longer look like the same run.
 
@@ -163,7 +174,7 @@ Every `go run . eval <arm>` now writes two files, both stemmed `<UTC timestamp>-
 Organized one file per stage, mirroring `rag`: `evalHarness/report_load.go` (INPUT — `loadRunRecords`), `report_predictions.go` (INPUT — `loadPredictionsCSV`), `report_group.go` and `report_stability.go` (TRANSFORM — pure statistics), `report.go` (OUTPUT + the `RunEvalReport` entrypoint, streams injected as `calibrateFloor` does).
 
 - **Output 1 — one row per run**, sorted by `run_id` (lexically chronological by construction): `run_id, arm, git_sha(7), dataset_hash(12), corpus_index_hash(12), model, TP, FP, TN, FN, precision, recall`. Hashes are abbreviated; **the model is not** — it is a grouping key, and truncating it could make two different models look like one configuration. An absent `corpus_index_hash` (arms 0/1) renders `—`, never blank or `0`.
-- **Output 2 — one row per configuration**, grouped by `(arm, git_sha, model, dataset_hash, corpus_index_hash)` and sorted by `n` desc then every key field asc. The tiebreak is load-bearing: Go randomises map iteration, so without a total ordering the report is nondeterministic and untestable. Counts are means; precision/recall carry mean and **sample** stddev (n−1 — the runs are draws from a non-deterministic process, not a complete population).
+- **Output 2 — one row per configuration**, grouped by `(arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash)` and sorted by `n` desc then every key field asc. The tiebreak is load-bearing: Go randomises map iteration, so without a total ordering the report is nondeterministic and untestable — which is why `rerank_model` had to join the tiebreak chain, not just the key. It is also **rendered** (Output 2's header, its table, and the stability block header, `—` when absent, via `orAbsent`): adding a field to the key without adding it to the display is its own bug, since two genuinely distinct configurations would then print under identical headers. Model names are never truncated — they are grouping keys. Counts are means; precision/recall carry mean and **sample** stddev (n−1 — the runs are draws from a non-deterministic process, not a complete population).
 - **`±` prints only when measured.** `aggregate.StdDevDefined` is what makes "not measured" representable; at n=1 `formatAggregate` prints the bare mean. `± 0.0000` would read as perfect reproducibility, the opposite of what one run says — and n=1 is the common case (3 of the 4 records on disk).
 - **Precision/recall are averaged PER RUN**, never recomputed from summed counts. Its test fixture had to be *constructed*: recall's denominator (`TP+FN`) is the dataset's positive count and so is constant across runs on one dataset, and the real records happen to have flagged the same number of stories — so a pooled implementation passes against live data. Only precision's denominator varies.
 - **The glob is non-recursive**, deliberately: `evalRuns/datasets/` and `evalRuns/corpus_index/` hold `<sha256>.json` artifacts, and a recursive walk would try to parse a 4.4 MB corpus index as a run record.
@@ -268,3 +279,105 @@ irrelevant (296)  211       11         74
 **Run order (the index is a single unversioned file, so `embed` destroys the pre-notes state — snapshot first).** *Issue #26 now archives the index automatically at both `embed` and `eval` time (`evalRuns/corpus_index/<sha256>.json`), so the manual `cp` below is no longer the only copy — but it stays the documented procedure here, since the archive is keyed by hash rather than by a name like "pre-notes" and the restore step still needs a file at `profile/corpus_index.json`.* `cp profile/corpus_index.json profile/corpus_index.pre-notes.json` → `calibrate-floor > profile/scores-pre-notes.csv` ($0.00) → `eval 2` (fresh baseline, same session, ~$0.08) → add `notes-*.md` → `embed` (~20 min, $0.00) → `calibrate-floor > profile/scores-notes.csv` (free ranking check before spending) → `eval 2` (~$0.08). Restore with the reverse `cp`. Both `profile/corpus_index*.json` and `profile/scores*.csv` are git-ignored. Verify the notes landed with `jq '[.chunks[] | select(.type=="note")] | length' profile/corpus_index.json`.
 
 **Deferred out of this issue, deliberately (PR #23 was closed for carrying them):** the displacement-measurement tooling (`rag.TopSourcesPerQuery`, a `best_source` CSV column, a top-1-match-by-corpus-file table in `calibrate-floor`) and the `RETRIEVAL_SIMILARITY_FLOOR` 0.0 → 0.3330 change. The floor is arm-3-only (`RetrievePooledContext`) and cannot move arm 2's numbers, so it had no business riding along. Each gets its own issue. **Design lesson: an experiment's tooling and its result are separable changes; bundling them makes the result hostage to reviewing the tooling.**
+
+## Approach 6 — reranking on top of RAG (issue #27; built, NOT yet measured)
+
+**Status: built end-to-end, no eval run yet.** Arm 4 = arm 3's retrieval with a
+cross-encoder (`voyageapi.Rerank`, `rerank-2.5`) rescoring each story's
+candidates before pooling. Same corpus, same index, same queries
+(`retrievalQueries`, shared verbatim with arm 3), same `poolChunks`, same
+`RETRIEVAL_POOL_CAP`, same `ragClassificationPrompt`. **No results row exists
+until `go run . eval 4` is run** (~5h, ~$0.29 Claude, $0.00 Voyage).
+
+**Why a second ranking stage.** A chunk's embedding is computed at embed time,
+before any story exists, and compresses ~800 words into one point — a topical
+average, so relevance living in one paragraph out of eight is averaged down by
+the other seven. A cross-encoder reads the title and the chunk together in one
+forward pass, so nothing is averaged and nothing is precomputed. That is also why
+it *follows* cosine rather than replacing it: it emits no reusable vector, so it
+must run live per pair, and scoring all 168 chunks per story would cost 168 pairs
+instead of 6. Cosine narrows, the cross-encoder reorders.
+
+### The five decisions taken while planning (three of them changed the spec)
+
+1. **`rerank-2.5`, not "rerank2.5".** The spec's id is not one Voyage accepts.
+   Valid: `rerank-2.5`, `rerank-2.5-lite`, `rerank-2`, `rerank-2-lite`,
+   `rerank-1`, `rerank-lite-1`. Response is `data[].{index, relevance_score}`,
+   **already sorted descending**; `index` addresses the *submitted* documents,
+   which is the only thing tying a score back to its chunk.
+2. **Pacing ships at the spec's ~52s with the uncertainty recorded in the
+   constant.** The rerank rate limits are assumed, not measured — see the
+   `voyageapi` note in Architecture. This is the difference between a ~5h and a
+   ~5min `eval 4`, so the assumption is written down rather than left implicit.
+3. **The rerank score REORDERS; it does not filter.** The issue said "the actual
+   filtering is expected to be done by the cross encoder score", but the design
+   as specified keeps the top `RERANK_TOP_K_PER_STORY` (2) per story
+   *unconditionally* and caps the pool afterwards — nothing is dropped for
+   scoring low. Shipping reorder-only keeps arm 4 a single-variable change and
+   matches the `calibrate-floor` lesson (measure before adding a knob). Every
+   kept `(story, chunk)` pair's cosine **and** rerank score is logged CSV-shaped
+   (`rag: rerank-score,<query>,<source>,<chunk_index>,<cosine>,<rerank>`), so a
+   rerank floor can be calibrated from the arm-4 run itself instead of a second
+   paid one. Logging rather than writing a file keeps `rag` free of new
+   artifacts — it writes the index and nothing else.
+4. **Baseline is the recorded NO-FLOOR arm 3 row (19/76/230/16) — a choice, not a
+   default.** At HEAD `RETRIEVAL_SIMILARITY_FLOOR = 0.3330`, so arm 3 runs at
+   **7.1 excerpts/call**; arm 4 (candidate floor 0) should land near arm 3's
+   no-floor **18.9**, volume-matched by construction. Comparing against arm 3 *at
+   HEAD* would be the Approach 4 excerpt-volume confound again. The cost of this
+   choice: the comparison is cross-commit and n=1 on both sides. The alternative
+   — re-running arm 3 volume-matched — is worth paying for only if arm 4 lands
+   near the acceptance line, and if taken **the floor change must be committed
+   first** (`git_sha` is HEAD, not the working tree). **Arm 4 logs its pooled
+   count per call**, and it must be checked against 18.9 before the comparison is
+   read in either direction: README records twice that assuming a pool size
+   instead of counting it produced a wrong conclusion.
+5. **The acceptance criteria are cleared by an exact tie.** FP ≤ 76, precision ≥
+   0.2000, recall ≥ 0.5429 *are* the no-floor arm 3 row, so landing on the line
+   means "did not lose ground", not "beat arm 3". Left as specified, flagged so
+   the result is read correctly. At 35 positives the SE on recall is ~8pp.
+
+### Constants, and what is inert
+
+`RERANK_CANDIDATES_PER_STORY` = 6 (count handed to the cross-encoder; bounded by
+the assumed 10K TPM — 6 × ~800-word chunks ≈ 7.9K tokens ≈ 79% of the minute, so
+raising it raises the pacing delay roughly linearly).
+`RERANK_TOP_K_PER_STORY` = 2, deliberately equal to `RETRIEVAL_TOP_K_PER_STORY`
+so the pooled volume stays comparable to arm 3's.
+
+> ⚠️ **`RERANK_CANDIDATE_FLOOR` = 0.0 is INERT, and is documented as inert rather
+> than as "0.0 by design".** Candidates are selected by **rank**, not by score, so
+> no value below the 6th-ranked cosine can fire. It is a **separate var from
+> `RETRIEVAL_SIMILARITY_FLOOR`, not a reuse**, and the reason is stronger than
+> avoiding coupling: the two are opposite in intent. Arm 3's floor is a
+> *relevance* filter — the last decision about what reaches the prompt, so it
+> wants to be strict. This one is a *recall* filter feeding the cross-encoder, so
+> it wants to be permissive enough that nothing the reranker could rescue is
+> discarded first. One constant cannot serve both. Arm 3's 0.3330 is untouched,
+> so arm 3's recorded numbers stand. `RETRIEVAL_SIMILARITY_FLOOR` shipped inert
+> once already and CLAUDE.md records what that cost — a knob that looks tuned but
+> cannot move invites someone to tune it and wonder why nothing changed.
+
+**What the pooled score now means.** `poolChunks` is unchanged, so dedupe still
+keeps each chunk's best score (CombMAX) and the sort is still descending — but
+the score is now a cross-encoder relevance score, produced per `(query,
+document)` pair and only loosely comparable **across** queries. Cosine already
+carried that caveat; this is a sharper version of it, since nothing normalizes a
+cross-encoder's outputs between queries.
+
+**`rerank_model` is on the run record** (issue #27, not deferred) — see the
+eval-pipeline section. Arm 1's `profile/user_context.json` is still un-hashed, so
+that asymmetry narrows here without closing.
+
+### Out of scope, deliberately
+
+- **Any floor on the rerank *score*.** Reorder-only ships (decision 3). The score
+  dump makes one calibratable later from the same run, and `RETRIEVAL_POOL_CAP` =
+  20 with `RERANK_TOP_K_PER_STORY` = 2 already truncates — so check whether an
+  existing knob already dominates it before adding one.
+- **Eval-report presentation** beyond the one key field: no new columns, no
+  cross-arm ranking, no README auto-update. PR #23's category.
+- **A rerank result cache** keyed on `(index hash, query, chunk key)`. Reranking
+  is deterministic given a fixed index, so a cache would make the repeat runs
+  needed to clear the noise floor cost only the Claude calls instead of ~5h each.
+  Tempting at 5h/run, but it is tooling and a separate bet.

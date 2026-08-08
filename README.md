@@ -107,6 +107,37 @@ When the script tries to filter the interested news items
 	- `RETRIEVAL_TOP_K`, `cosineSimilarity`, `topKBySimilarity`, `RetrieveContext` and the arm 2 prompt are untouched
 	- The only production edit is a `note` case in `rag.inferType`, and even that is cosmetic — `Chunk.Type` is stamped at index-build time, never read by retrieval or ranking, and exists so the built index can be inspected with `jq`
 
+### Approach 6 - Rerank the retrieved chunks
+
+---
+
+#### Solution
+
+- Approaches 3-5 all rank corpus chunks by **cosine similarity** alone
+	- A chunk's vector is computed at embed time, before any story exists, and compresses ~800 words into a single point — a topical average
+	- A chunk whose relevance lives in one paragraph out of eight is averaged down by the other seven
+- Add a second ranking stage: a **cross-encoder** (Voyage's `rerank-2.5`)
+	- It reads the story title and the chunk **together in one forward pass**, so every token of the title can attend to every token of the chunk
+	- Nothing is averaged and nothing is precomputed: the score is produced for that specific (story, chunk) pair
+- It cannot replace cosine, only follow it
+	- A cross-encoder emits no reusable vector, so it cannot be indexed — it must run live for every pair
+	- Scoring all 168 chunks per story would cost 168 pairs; cosine narrows first, the cross-encoder reorders what survives
+
+##### Step 1
+- Per story, cosine selects `RERANK_CANDIDATES_PER_STORY` (6) candidate chunks — the same per-story queries arm 3 uses, against the same index
+- The candidate stage is now a **recall** filter, not a relevance filter, so it uses its own permissive `RERANK_CANDIDATE_FLOOR` (0.0) rather than arm 3's strict `RETRIEVAL_SIMILARITY_FLOOR` (0.3330), which is left untouched
+
+##### Step 2
+- The 6 candidates and the title go to `rerank-2.5`, which returns a relevance score per chunk
+- The top `RERANK_TOP_K_PER_STORY` (2) are kept — the same count arm 3 keeps, so the pooled excerpt volume stays comparable
+- Pooling, dedupe (best score wins), sort and the `RETRIEVAL_POOL_CAP` (20) truncation are arm 3's, unchanged; only the *scale* of the score changed
+
+##### What this deliberately does **not** do
+- **The rerank score reorders; it does not filter.** The top 2 per story are kept unconditionally. Issue #27 expected the cross-encoder to do the filtering the cosine floor does for arm 3; shipping reorder-only keeps arm 4 a single-variable change against arm 3, and follows this repo's own `calibrate-floor` lesson — measure the scores before building a knob on them. Every kept (story, chunk) pair's cosine **and** rerank score is logged CSV-shaped, so a rerank floor can be calibrated from the arm-4 run itself rather than by paying for a second one.
+- **`RERANK_CANDIDATE_FLOOR` is inert at 0.0.** Candidates are chosen by *rank*, so no value below the 6th-ranked chunk's cosine can fire. It is a placeholder for a filter the arm does not yet have, and it is labelled as one — `RETRIEVAL_SIMILARITY_FLOOR` shipped inert once already.
+- **The prompt is not touched.** Arm 4 shares the retrieval arms' prompt verbatim, so no eval delta can come from prompt *wording*.
+- **The corpus index is not touched.** No re-embed, no snapshot; arms 2 and 3 baselines survive.
+
 ## Run modes (arms)
 
 - The classifier flow is selected **explicitly** by an `arm` argument.
@@ -119,6 +150,7 @@ When the script tries to filter the interested news items
 | `1` | `summary` + `interests` from `profile/user_context.json` | interests injected into the prompt | the distilled JSON is missing (run `prebuild` first) |
 | `2` | top-k corpus excerpts retrieved for the batch being classified | excerpts inlined into the prompt as evidence of the reader's interests | `profile/corpus_index.json` is missing, or retrieval fails (run `embed` first) |
 | `3` | corpus excerpts retrieved **per story** and pooled, capped at `RETRIEVAL_POOL_CAP` | same prompt *template*, corpus and index as arm 2; excerpt *selection* differs — and so does excerpt **count** (up to 20 vs arm 2's 5), see the confound note below | same as arm 2 |
+| `4` | arm 3's per-story excerpts, **reranked by a cross-encoder** before pooling | same prompt, corpus, index, queries and pool cap as arm 3; only the per-story *ranking* differs (`rerank-2.5` instead of cosine) | same as arm 2, or the Voyage rerank call fails |
 
 ```bash
 # Approach 1
@@ -143,6 +175,10 @@ go run . eval 3         # eval under arm 3 — same free-tier throttling as arm 
 # Approach 5 — reading notes in the corpus (arm 2)
 go run . embed          # picks up notes-*.md with no other wiring
 go run . eval 2         # arm 2 is unchanged; only the corpus behind it widened
+
+# Approach 6 — reranking on top of RAG
+go run . 4              # normal run, arm 4 (per-story RAG + cross-encoder rerank)
+go run . eval 4         # eval under arm 4 — one rerank call per story, see the cost note
 
 # Reading the eval history back (free — no API call, writes nothing)
 go run . eval-report    # every run, per-configuration mean ± spread, then per-story stability
@@ -179,6 +215,11 @@ Comparing two runs is a `join` on `story_id` between their CSVs.
 }
 ```
 
+Arm 4 records one more field, `"rerank_model": "rerank-2.5"` — a second model
+decides its numbers, and swapping it for `rerank-2.5-lite` would change them
+without touching the code, the data or the LLM. Records cannot be back-filled,
+which is why the field shipped with the arm rather than after it.
+
 **Why the hashes.** The two inputs that decide the numbers — the labelled dataset
 and `profile/corpus_index.json` — are both git-ignored and overwritten in place.
 Approach 5 re-based every arm 2 and arm 3 number by re-embedding a widened
@@ -187,7 +228,7 @@ first. So each run archives its inputs content-addressed:
 
 ```
 evalRuns/datasets/<sha256>.json       # the labelled dataset it scored against
-evalRuns/corpus_index/<sha256>.json   # the index it retrieved from (arms 2 & 3)
+evalRuns/corpus_index/<sha256>.json   # the index it retrieved from (arms 2, 3 & 4)
 ```
 
 Write-if-absent, so repeat runs over unchanged inputs add nothing; a *changed*
@@ -198,6 +239,10 @@ archives the index too, which captures it at build time rather than at first
 eval.
 
 `corpus_index_hash` is **absent** for arms 0 and 1 — they never load the index.
+`rerank_model` is absent for every arm but 4, for the same reason. Absent, not
+empty: an empty value would read as "an empty index" or "no reranker was chosen",
+rather than "this arm does not use one" — and it keeps existing records
+byte-identical.
 
 Two limitations worth knowing before trusting a record:
 
@@ -231,15 +276,15 @@ run_id                  arm  git_sha  dataset_hash  corpus_index  model         
 20260806T090351Z-arm-0  0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  17  117  189  18  0.1269     0.4857
 20260806T090525Z-arm-3  3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  20  70   236  15  0.2222     0.5714
 
-=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — 3 groups ===
+=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — 3 groups ===
 
-arm  git_sha  dataset_hash  corpus_index  model                      n  TP    FP     TN     FN    precision        recall
-2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  2  22.5  80.5   225.5  12.5  0.2184 ± 0.0206  0.6429 ± 0.0606
-0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  1  17.0  117.0  189.0  18.0  0.1269           0.4857
-3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  1  20.0  70.0   236.0  15.0  0.2222           0.5714
+arm  git_sha  dataset_hash  corpus_index  model                      rerank_model  n  TP    FP     TN     FN    precision        recall
+2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  —             2  22.5  80.5   225.5  12.5  0.2184 ± 0.0206  0.6429 ± 0.0606
+0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  —             1  17.0  117.0  189.0  18.0  0.1269           0.4857
+3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  —             1  20.0  70.0   236.0  15.0  0.2222           0.5714
 
 === Per-story stability — arm 2, 1b4a0be, dataset a59941fa34f7,
-     index 3daf2eee4e65, claude-haiku-4-5-20251001 (n=2 runs) ===
+     index 3daf2eee4e65, claude-haiku-4-5-20251001, rerank — (n=2 runs) ===
 
                   never     sometimes  always
                   (0 of 2)  (1 of 2)   (2 of 2)
@@ -253,8 +298,8 @@ irrelevant (296)  211       11         74
   full — it is a grouping key, and truncating it could make two different models
   look like one.
 - **Table 2** — one row per *configuration*: runs are repeats of the same
-  experiment only if they shared all five of arm, commit, model, dataset and
-  corpus index. Counts are means; precision and recall carry the **sample**
+  experiment only if they shared all six of arm, commit, model, rerank model,
+  dataset and corpus index. Counts are means; precision and recall carry the **sample**
   standard deviation (n−1 denominator — the runs are draws from a
   non-deterministic process, not a complete population).
 - **`±` appears only when it was measured.** At n=1 there is no spread, so no `±`
@@ -491,8 +536,46 @@ arm 2 vs arm 3 re-run above (~$0.16 total, and the only way to attribute that
 delta — note it must be re-run against the post-notes index, since arm 3's tabled
 numbers are now stale); then smaller chunks (currently 800 words — a ~9-word
 title averaged against an 800-word window dilutes the signal, and re-testing at
-the retrieval layer via `calibrate-floor` is free); then reranking — evaluated
-first as a scoring function (AUC on a subsample) before any arm is wired.
+the retrieval layer via `calibrate-floor` is free); then reranking — now wired as
+**arm 4** (Approach 6) and **not yet measured**, see below.
+
+#### Arm 4 (reranking) — cost, runtime, and what it will be compared against
+
+**Not yet run.** No results row is added until it is measured.
+
+| | API calls | cost | wall clock |
+|--|--|--|--|
+| production run (30 stories) | 30 rerank + 1 embed + 1 Claude | $0.00 Voyage, ~$0.001 Claude | ~26 min |
+| `eval 4` (341 stories, 12 batches) | 341 rerank + 12 embed + 12 Claude | $0.00 Voyage (~2.7M tokens against the 200M free allowance), ~$0.29 Claude | ~5 h |
+
+Both wall-clock figures are dominated by **pacing, not compute**: ~52s between
+rerank calls, from 6 chunks × ~800 words ≈ 7.9K tokens against an assumed 10K
+tokens/min budget.
+
+> ⚠️ **That budget is assumed, not verified.** Voyage documents `rerank-2.5` at
+> 2000 RPM / 2M TPM for Tier 1 ("payment method added") and documents no
+> no-payment tier at all. The 3 RPM / 10K TPM this repo works to was observed on
+> the **embeddings** endpoint. The pacing constants are mutable package vars
+> (`VOYAGE_RERANK_TPM_LIMIT`, `VOYAGE_RERANK_MIN_REQUEST_GAP`) precisely so that
+> if a 429 never appears they can be relaxed without a code change — the
+> difference between a ~5-hour and a ~5-minute `eval 4`.
+
+**The baseline is the recorded no-floor arm 3 row (19 / 76 / 230 / 16), by
+choice.** At HEAD arm 3 runs at 7.1 excerpts per call; arm 4 takes 2 chunks from
+each of 30 stories, dedupes, and caps at 20, so it should land near arm 3's
+**no-floor** 18.9 — volume-matched by construction, which comparing against arm 3
+*at HEAD* would not be. The cost is that the comparison is then cross-commit and
+n=1 on both sides; a fresh volume-matched arm 3 re-run is the alternative, worth
+paying for only if arm 4 lands near the acceptance line. **Arm 4's own pooled
+excerpt count is logged per call** and must be checked against 18.9 before the
+comparison is read in either direction — this README records twice that assuming
+a pool size instead of counting it produced a wrong conclusion.
+
+**Read the acceptance criteria carefully:** FP ≤ 76, precision ≥ 0.2000, recall ≥
+0.5429 are *exactly* the no-floor arm 3 row, so they are cleared by an exact tie —
+i.e. by no improvement. A result on the line means "did not lose ground", not
+"beat arm 3". And at 35 positives the standard error on recall is ~8pp, so a
+single run clearing them by a hair is a screening pass, not evidence.
 
 ## Setup
 
@@ -503,7 +586,7 @@ The project needs two secret API keys and one non-secret config value:
 | Name | Type | Used by | Where it lives |
 |------|------|---------|----------------|
 | `ANTHROPIC_API_KEY` | secret | All Approaches | macOS Keychain |
-| `VOYAGE_API_KEY` | secret | Approach 3 | macOS Keychain |
+| `VOYAGE_API_KEY` | secret | Approaches 3-6 — the `embed` and `calibrate-floor` steps and every arm 2/3/4 run (arm 4 also calls the rerank endpoint) | macOS Keychain |
 | `GITHUB_USERNAME` | non-secret | Approach 2 | `.env` (see `.env.example`) |
 
 ### How to initialize the API keys (macOS Keychain)?
@@ -523,6 +606,15 @@ security find-generic-password -a "$USER" -s "VOYAGE_API_KEY"    -w
 ## Run script
 
 Use any one of the modes mentioned under the [Run modes](#run-modes-arms) section.
+
+`tech-news-run.sh` (the scheduled entrypoint) exports **only**
+`ANTHROPIC_API_KEY`, because the 4-hourly production run is arm 0. Any run that
+retrieves — arms 2, 3 and 4, plus `embed` and `calibrate-floor` — needs the
+Voyage key exported first:
+
+```bash
+export VOYAGE_API_KEY=$(security find-generic-password -a "$USER" -s VOYAGE_API_KEY -w)
+```
 
 ## License
 
