@@ -114,9 +114,10 @@ func TestFormatRunsTableMarksAbsentCorpusIndex(t *testing.T) {
 	}
 }
 
-// The rerank model is a grouping key, so Output 1 prints it whole - rerank-2.5
-// and rerank-2.5-lite share a 12-character prefix, and abbreviating would make
-// two cross-encoders look like one configuration.
+// The rerank model is a grouping key, so Output 1 prints it whole. Abbreviating
+// to the 12-character hash width would render rerank-2.5-lite as "rerank-2.5-l":
+// not a model Voyage has, and stripped of the exact suffix that distinguishes it
+// from rerank-2.5.
 func TestFormatRunsTablePrintsRerankModelInFull(t *testing.T) {
 	record := testRecord("20260806T084423Z-arm-4", 4)
 	record.RerankModel = "rerank-2.5-lite"
@@ -428,7 +429,10 @@ func TestStabilityHeaderMarksAbsentCorpusIndex(t *testing.T) {
 		N:   2,
 	})
 
-	if !strings.Contains(header, ABSENT_VALUE) {
+	// Anchored to the labelled field, not to a bare ABSENT_VALUE: the header's
+	// own "stability — arm" separator is an em dash, so a bare Contains check
+	// passes whatever the index field renders as - including nothing at all.
+	if !strings.Contains(header, "index "+ABSENT_VALUE) {
 		t.Errorf("expected %q for the absent corpus index hash: %q", ABSENT_VALUE, header)
 	}
 	// The model is a grouping key, so it is never abbreviated.
@@ -461,7 +465,10 @@ func TestStabilityHeaderNamesTheRerankModel(t *testing.T) {
 		},
 		N: 2,
 	})
-	if !strings.Contains(plain, ABSENT_VALUE) {
+	// Same anchoring as the corpus-index test above, and for the same reason: the
+	// header contains an em dash unconditionally, so `Contains(plain,
+	// ABSENT_VALUE)` would still pass with the rerank field dropped entirely.
+	if !strings.Contains(plain, "rerank "+ABSENT_VALUE) {
 		t.Errorf("arm-2 header should mark the absent reranker with %q: %q", ABSENT_VALUE, plain)
 	}
 }

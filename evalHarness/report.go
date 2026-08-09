@@ -311,8 +311,11 @@ func newTableWriter(b *strings.Builder) *tabwriter.Writer {
 //
 // It is deliberately NOT shortHash with a large width: shortHash truncates, and
 // rerank-2.5-lite is 15 characters against the 12-character hash width, so
-// reusing it would print "rerank-2.5-l" and break the no-truncation rule that
-// makes a grouping key readable - two rerank models must never render as one.
+// reusing it would print "rerank-2.5-l" - a model id Voyage does not have, with
+// the exact suffix that separates it from rerank-2.5 cut off. None of Voyage's
+// six rerank ids actually collide at 12 characters, so the failure is a mangled
+// value rather than an ambiguous one; a grouping key must render as the thing it
+// keys on either way.
 func orAbsent(s string) string {
 	if s == "" {
 		return ABSENT_VALUE

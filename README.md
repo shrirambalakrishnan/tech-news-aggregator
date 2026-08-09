@@ -255,7 +255,7 @@ first. So each run archives its inputs content-addressed:
 
 ```
 evalRuns/datasets/<sha256>.json       # the labelled dataset it scored against
-evalRuns/corpus_index/<sha256>.json   # the index it retrieved from (arms 2 & 3)
+evalRuns/corpus_index/<sha256>.json   # the index it retrieved from (arms 2, 3 & 4)
 ```
 
 Write-if-absent, so repeat runs over unchanged inputs add nothing; a *changed*
@@ -321,9 +321,13 @@ irrelevant (296)  211       11         74
 - **Table 1** — one row per run, sorted by `run_id` (chronological by
   construction). `git_sha` is abbreviated to 7 so it pastes into `git show`; the
   content hashes to 12, enough to name one archived file. Both models are printed
-  in full — they are grouping keys, and truncating one could make two different
-  models look like one (`rerank-2.5` and `rerank-2.5-lite` share a 12-character
-  prefix). `rerank_model` shows `—` on arms 0–3, which never rerank.
+  in full — they are grouping keys, and abbreviating one would print a value that
+  is not the thing it keys on (`rerank-2.5-lite` truncated to the 12-character
+  hash width is `rerank-2.5-l`, a model that does not exist). `rerank_model` shows
+  `—` on arms 0–3, which never rerank — **and on the one arm-4 run recorded before
+  issue #39 added the field**, `20260809T094948Z-arm-4`. Records cannot be
+  back-filled, so on an arm-4 row read `—` as "written before #39" (it ran under
+  `rerank-2.5`), not as "did not rerank".
 - **Table 2** — one row per *configuration*: runs are repeats of the same
   experiment only if they shared all six of arm, commit, model, rerank model,
   dataset and corpus index. Counts are means; precision and recall carry the **sample**

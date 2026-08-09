@@ -16,9 +16,10 @@ import (
 // spread (0.343 ± 0.076), and it was computed by hand.
 //
 // Grouping is what makes the spread meaningful: two runs are repeats of the same
-// experiment only if they shared the arm, the code, the model, the dataset and
-// the corpus index. Any of those differing makes them two experiments, and
-// averaging across them would report a difference as if it were noise.
+// experiment only if they shared the arm, the code, the model, the rerank model,
+// the dataset and the corpus index. Any of those differing makes them two
+// experiments, and averaging across them would report a difference as if it were
+// noise.
 //
 // Everything here is PURE - no I/O - for the same reason Evaluate is: the
 // statistics are the part worth unit-testing against hand-computed numbers.
