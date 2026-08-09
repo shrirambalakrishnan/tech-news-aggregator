@@ -35,6 +35,34 @@ sub-agent — the back-and-forth with the developer is the point.
   - List the items to be done in each step as bullet points, or however is best
     to represent it
   - Ensure each step is implementable and will be a meaningful commit to make
+- Trim the plan before posting
+  - Re-read the draft against the issue's scope and cut what is not needed to
+    satisfy it. Each check names something to go look at — none is a judgement
+    call made from memory. **Work in this order: production code, then tests,
+    then commit shape.** Cutting a production change removes its tests for free;
+    trimming tests first leaves behind the code that demanded them.
+    - **Can existing code already do this?** Grep for the function before
+      specifying a new one, and name the existing one in the plan. Reuse is the
+      first cut to look for, and the one that shrinks everything downstream.
+    - **Is a new helper cheaper than the duplication it removes?** Count the
+      lines: a helper called once is indirection, not reuse — inline it. If it
+      is worth extracting and a similar helper already exists, state in the plan
+      why that one could not be used.
+    - **Does an existing test already cover this?** Grep the test files before
+      specifying a new one, and cite the existing test in the plan instead. A
+      duplicate test is the easiest thing to add and the hardest to notice.
+    - **Are the tests proportional to the code under test?** Specify the cases
+      that can actually fail, not one per branch. Test volume is the single
+      largest source of plan bloat measured so far — order here is sequence, not
+      weight.
+    - **Is each step a meaningful commit, or is it ceremony?** One coherent
+      change in one file is one commit, however many bullet points it has.
+  - Re-run the split check against the DRAFT, not just the issue text. Work that
+    turns out to belong to another ticket is easier to see once it is written
+    down as steps. Propose it as a follow-up issue and cut it.
+  - Documentation changes stay only where the change would otherwise make an
+    existing document wrong. Isolate them as the last step and label them
+    droppable; do not narrate the change in docs that never mentioned the thing.
 - Post the plan as a new comment to the issue
   - Any plan review happens on GitHub only, so post the plan directly without
     asking for confirmation
