@@ -106,8 +106,8 @@ func renderStabilitySections(out, warnOut io.Writer, groups []runGroup) {
 
 		table, err := stabilityForGroup(g)
 		if err != nil {
-			fmt.Fprintf(warnOut, "eval-report: no stability block for arm %d / %s: %v\n",
-				g.Key.Arm, shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN), err)
+			fmt.Fprintf(warnOut, "eval-report: no stability block for arm %d / config %s: %v\n",
+				g.Key.Arm, shortHash(g.Key.ConfigFingerprint, CONTENT_HASH_SHORT_LEN), err)
 			continue
 		}
 
@@ -140,9 +140,9 @@ func stabilityForGroup(g runGroup) (stabilityTable, error) {
 // every arm but 4, and renders as ABSENT_VALUE rather than as a blank.
 func stabilityHeader(g runGroup) string {
 	return fmt.Sprintf(
-		"=== Per-story stability — arm %d, %s, dataset %s,\n     index %s, %s, rerank %s (n=%d runs) ===",
+		"=== Per-story stability — arm %d, config %s, dataset %s,\n     index %s, %s, rerank %s (n=%d runs) ===",
 		g.Key.Arm,
-		shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN),
+		shortHash(g.Key.ConfigFingerprint, CONTENT_HASH_SHORT_LEN),
 		shortHash(g.Key.DatasetHash, CONTENT_HASH_SHORT_LEN),
 		shortHash(g.Key.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
 		g.Key.Model,
@@ -249,7 +249,7 @@ func groupsHeader(groups int) string {
 		noun = "group"
 	}
 	return fmt.Sprintf(
-		"=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — %d %s ===",
+		"=== Grouped by (arm, config, model, rerank_model, dataset_hash, corpus_index_hash) — %d %s ===",
 		groups, noun,
 	)
 }
@@ -265,11 +265,11 @@ func formatGroupsTable(groups []runGroup) string {
 	var b strings.Builder
 	w := newTableWriter(&b)
 
-	fmt.Fprintln(w, "arm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\trerank_model\tn\tTP\tFP\tTN\tFN\tprecision\trecall")
+	fmt.Fprintln(w, "arm\tconfig\tdataset_hash\tcorpus_index\tmodel\trerank_model\tn\tTP\tFP\tTN\tFN\tprecision\trecall")
 	for _, g := range groups {
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\t%s\n",
 			g.Key.Arm,
-			shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN),
+			shortHash(g.Key.ConfigFingerprint, CONTENT_HASH_SHORT_LEN),
 			shortHash(g.Key.DatasetHash, CONTENT_HASH_SHORT_LEN),
 			shortHash(g.Key.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
 			g.Key.Model,

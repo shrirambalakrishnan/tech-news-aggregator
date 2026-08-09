@@ -250,7 +250,7 @@ func TestRenderEvalReportPrintsBothSections(t *testing.T) {
 	out, _ := renderForTest(t)
 
 	runsAt := strings.Index(out, "=== Eval runs (2) ===")
-	groupsAt := strings.Index(out, "=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — 1 group ===")
+	groupsAt := strings.Index(out, "=== Grouped by (arm, config, model, rerank_model, dataset_hash, corpus_index_hash) — 1 group ===")
 	if runsAt < 0 {
 		t.Fatalf("runs section missing:\n%s", out)
 	}
@@ -425,7 +425,7 @@ func TestFormatStabilityTableAdaptsColumnsToN(t *testing.T) {
 // a blank field there reads as an empty index rather than as no index.
 func TestStabilityHeaderMarksAbsentCorpusIndex(t *testing.T) {
 	header := stabilityHeader(runGroup{
-		Key: runGroupKey{Arm: 0, GitSHA: "1b4a0bec0ffee", Model: "claude-haiku-4-5-20251001"},
+		Key: runGroupKey{Arm: 0, ConfigFingerprint: "c0nf1g1dent1ty", Model: "claude-haiku-4-5-20251001"},
 		N:   2,
 	})
 
@@ -446,7 +446,7 @@ func TestStabilityHeaderMarksAbsentCorpusIndex(t *testing.T) {
 func TestStabilityHeaderNamesTheRerankModel(t *testing.T) {
 	reranked := stabilityHeader(runGroup{
 		Key: runGroupKey{
-			Arm: 4, GitSHA: "1b4a0bec0ffee",
+			Arm: 4, ConfigFingerprint: "c0nf1g1dent1ty",
 			Model: "claude-haiku-4-5-20251001", RerankModel: "rerank-2.5-lite",
 			DatasetHash: "a59941fa34f7", CorpusIndexHash: "3daf2eee4e65",
 		},
@@ -458,7 +458,7 @@ func TestStabilityHeaderNamesTheRerankModel(t *testing.T) {
 
 	plain := stabilityHeader(runGroup{
 		Key: runGroupKey{
-			Arm: 2, GitSHA: "1b4a0bec0ffee",
+			Arm: 2, ConfigFingerprint: "c0nf1g1dent1ty",
 			Model: "claude-haiku-4-5-20251001",
 			// No RerankModel: arm 2 does not rerank.
 			DatasetHash: "a59941fa34f7", CorpusIndexHash: "3daf2eee4e65",

@@ -3,6 +3,8 @@ package evalHarness
 import (
 	"math"
 	"testing"
+
+	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
 )
 
 const floatTolerance = 1e-9
@@ -29,6 +31,7 @@ func groupableRecord(runID string) RunRecord {
 		DatasetHash:     "a59941fa34f7",
 		CorpusIndexHash: "3daf2eee4e65",
 		Model:           "claude-haiku-4-5-20251001",
+		Config:          map[string]string{"eval_batch_size": "30", "retrieval_top_k": "5"},
 		Metrics:         RunMetrics{TP: 24, FP: 79, TN: 227, FN: 11, Precision: 0.2330, Recall: 0.6857},
 	}
 }
@@ -53,7 +56,7 @@ func TestGroupRunsCollapsesIdenticalConfigurations(t *testing.T) {
 func TestGroupRunsSplitsOnEveryKeyField(t *testing.T) {
 	cases := map[string]func(*RunRecord){
 		"arm":               func(r *RunRecord) { r.Arm = 3 },
-		"git_sha":           func(r *RunRecord) { r.GitSHA = "deadbee" },
+		"config":            func(r *RunRecord) { r.Config = map[string]string{"eval_batch_size": "30", "retrieval_top_k": "8"} },
 		"model":             func(r *RunRecord) { r.Model = "claude-sonnet-5" },
 		"rerank_model":      func(r *RunRecord) { r.RerankModel = "rerank-2.5" },
 		"dataset_hash":      func(r *RunRecord) { r.DatasetHash = "ffffffffffff" },
@@ -68,6 +71,105 @@ func TestGroupRunsSplitsOnEveryKeyField(t *testing.T) {
 			groups := groupRuns([]RunRecord{groupableRecord("20260806T084423Z-arm-2"), second})
 			if len(groups) != 2 {
 				t.Fatalf("differing %s produced %d groups, want 2", field, len(groups))
+			}
+		})
+	}
+}
+
+// Issue #40's headline behaviour: two runs of the same configuration must group
+// together even though an unrelated commit landed between them. Five arm-2
+// records on disk are split exactly this way today - same dataset, same index,
+// same constants, two shas whose only code difference is the eval-report
+// aggregator itself.
+func TestGroupRunsIgnoresGitSHAWhenConfigIsRecorded(t *testing.T) {
+	first := groupableRecord("20260806T084423Z-arm-2")
+	second := groupableRecord("20260807T204405Z-arm-2")
+	second.GitSHA = "74f5520"
+
+	groups := groupRuns([]RunRecord{first, second})
+	if len(groups) != 1 {
+		t.Fatalf("two shas with one config produced %d groups, want 1: %+v", len(groups), groups)
+	}
+	if groups[0].N != 2 {
+		t.Errorf("n = %d, want 2", groups[0].N)
+	}
+}
+
+// Records written before issue #40 carry no config and cannot be back-filled.
+// They must group exactly as they did before the field existed - by git SHA -
+// rather than merging on an empty config, which would assert they shared
+// constants nobody recorded.
+func TestGroupRunsFallsBackToGitSHAWithoutAConfig(t *testing.T) {
+	preConfig := func(runID, sha string) RunRecord {
+		r := groupableRecord(runID)
+		r.Config, r.GitSHA = nil, sha
+		return r
+	}
+
+	sameSHA := groupRuns([]RunRecord{
+		preConfig("20260806T084423Z-arm-2", "1b4a0be"),
+		preConfig("20260806T085514Z-arm-2", "1b4a0be"),
+	})
+	if len(sameSHA) != 1 || sameSHA[0].N != 2 {
+		t.Errorf("pre-config records on one sha did not group: %+v", sameSHA)
+	}
+
+	differentSHA := groupRuns([]RunRecord{
+		preConfig("20260806T084423Z-arm-2", "1b4a0be"),
+		preConfig("20260807T204405Z-arm-2", "74f5520"),
+	})
+	if len(differentSHA) != 2 {
+		t.Errorf("pre-config records on two shas produced %d groups, want 2", len(differentSHA))
+	}
+}
+
+// A retuned constant must split the groups of the arms that READ it and leave
+// every other arm alone. retrieval_pool_cap is the sharper of the two cases:
+// arms 3 and 4 both record it and arms 0-2 do not, so a wrong per-arm key set in
+// configForArm shows up here in a way a single-arm constant cannot show it.
+func TestGroupRunsSplitsOnlyTheArmsRecordingAChangedConstant(t *testing.T) {
+	arms := []hackernews_classifier.Arm{
+		hackernews_classifier.ArmGeneric,
+		hackernews_classifier.ArmInterests,
+		hackernews_classifier.ArmRAG,
+		hackernews_classifier.ArmRAGPerStory,
+		hackernews_classifier.ArmRerank,
+	}
+
+	cases := []struct {
+		constant string
+		splits   []hackernews_classifier.Arm
+	}{
+		{"retrieval_top_k", []hackernews_classifier.Arm{hackernews_classifier.ArmRAG}},
+		{"retrieval_pool_cap", []hackernews_classifier.Arm{
+			hackernews_classifier.ArmRAGPerStory, hackernews_classifier.ArmRerank}},
+	}
+
+	for _, test := range cases {
+		t.Run(test.constant, func(t *testing.T) {
+			for _, arm := range arms {
+				baseline := groupableRecord("20260806T084423Z-run")
+				baseline.Arm, baseline.Config = int(arm), configForArm(arm)
+
+				retuned := groupableRecord("20260807T204405Z-run")
+				retuned.Arm, retuned.Config = int(arm), configForArm(arm)
+				// An arm that does not record the constant sees no change at
+				// all, which is the point: it must stay one group.
+				if _, records := retuned.Config[test.constant]; records {
+					retuned.Config[test.constant] = "999"
+				}
+
+				wantGroups := 1
+				for _, splitting := range test.splits {
+					if splitting == arm {
+						wantGroups = 2
+					}
+				}
+
+				if got := len(groupRuns([]RunRecord{baseline, retuned})); got != wantGroups {
+					t.Errorf("arm %d: retuning %s produced %d groups, want %d",
+						arm, test.constant, got, wantGroups)
+				}
 			}
 		})
 	}
