@@ -114,6 +114,36 @@ func TestFormatRunsTableMarksAbsentCorpusIndex(t *testing.T) {
 	}
 }
 
+// The rerank model is a grouping key, so Output 1 prints it whole. Abbreviating
+// to the 12-character hash width would render rerank-2.5-lite as "rerank-2.5-l":
+// not a model Voyage has, and stripped of the exact suffix that distinguishes it
+// from rerank-2.5.
+func TestFormatRunsTablePrintsRerankModelInFull(t *testing.T) {
+	record := testRecord("20260806T084423Z-arm-4", 4)
+	record.RerankModel = "rerank-2.5-lite"
+
+	table := formatRunsTable([]RunRecord{record})
+	if !strings.Contains(table, "rerank_model") {
+		t.Errorf("runs table missing the rerank_model column:\n%s", table)
+	}
+	if !strings.Contains(table, "rerank-2.5-lite") {
+		t.Errorf("table must print the rerank model in full:\n%s", table)
+	}
+}
+
+// Arms 0-3 never rerank. That absence must render as ABSENT_VALUE, for the same
+// reason the corpus index hash does: a blank cell reads as "reranked with
+// nothing" rather than "did not rerank".
+func TestFormatRunsTableMarksAbsentRerankModel(t *testing.T) {
+	record := testRecord("20260806T084423Z-arm-2", 2)
+	record.RerankModel = ""
+
+	table := formatRunsTable([]RunRecord{record})
+	if strings.Count(table, ABSENT_VALUE) != 1 {
+		t.Errorf("expected exactly one %q (the absent rerank model):\n%s", ABSENT_VALUE, table)
+	}
+}
+
 func TestRenderEvalReportPrintsRunCount(t *testing.T) {
 	withStubbedRecords(t, []RunRecord{
 		testRecord("20260806T084423Z-arm-2", 2),
@@ -220,7 +250,7 @@ func TestRenderEvalReportPrintsBothSections(t *testing.T) {
 	out, _ := renderForTest(t)
 
 	runsAt := strings.Index(out, "=== Eval runs (2) ===")
-	groupsAt := strings.Index(out, "=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — 1 group ===")
+	groupsAt := strings.Index(out, "=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — 1 group ===")
 	if runsAt < 0 {
 		t.Fatalf("runs section missing:\n%s", out)
 	}
@@ -399,11 +429,56 @@ func TestStabilityHeaderMarksAbsentCorpusIndex(t *testing.T) {
 		N:   2,
 	})
 
-	if !strings.Contains(header, ABSENT_VALUE) {
+	// Anchored to the labelled field, not to a bare ABSENT_VALUE: the header's
+	// own "stability — arm" separator is an em dash, so a bare Contains check
+	// passes whatever the index field renders as - including nothing at all.
+	if !strings.Contains(header, "index "+ABSENT_VALUE) {
 		t.Errorf("expected %q for the absent corpus index hash: %q", ABSENT_VALUE, header)
 	}
 	// The model is a grouping key, so it is never abbreviated.
 	if !strings.Contains(header, "claude-haiku-4-5-20251001") {
 		t.Errorf("header must print the model in full: %q", header)
+	}
+}
+
+// Output 3's header names the configuration, and the reranker is part of that
+// configuration now that it is part of the key.
+func TestStabilityHeaderNamesTheRerankModel(t *testing.T) {
+	reranked := stabilityHeader(runGroup{
+		Key: runGroupKey{
+			Arm: 4, GitSHA: "1b4a0bec0ffee",
+			Model: "claude-haiku-4-5-20251001", RerankModel: "rerank-2.5-lite",
+			DatasetHash: "a59941fa34f7", CorpusIndexHash: "3daf2eee4e65",
+		},
+		N: 2,
+	})
+	if !strings.Contains(reranked, "rerank-2.5-lite") {
+		t.Errorf("arm-4 header must name the reranker in full: %q", reranked)
+	}
+
+	plain := stabilityHeader(runGroup{
+		Key: runGroupKey{
+			Arm: 2, GitSHA: "1b4a0bec0ffee",
+			Model: "claude-haiku-4-5-20251001",
+			// No RerankModel: arm 2 does not rerank.
+			DatasetHash: "a59941fa34f7", CorpusIndexHash: "3daf2eee4e65",
+		},
+		N: 2,
+	})
+	// Same anchoring as the corpus-index test above, and for the same reason: the
+	// header contains an em dash unconditionally, so `Contains(plain,
+	// ABSENT_VALUE)` would still pass with the rerank field dropped entirely.
+	if !strings.Contains(plain, "rerank "+ABSENT_VALUE) {
+		t.Errorf("arm-2 header should mark the absent reranker with %q: %q", ABSENT_VALUE, plain)
+	}
+}
+
+func TestOrAbsent(t *testing.T) {
+	if got := orAbsent(""); got != ABSENT_VALUE {
+		t.Errorf("orAbsent(\"\") = %q, want %q", got, ABSENT_VALUE)
+	}
+	// Never truncated, however long: the value is a grouping key.
+	if got := orAbsent("rerank-2.5-lite"); got != "rerank-2.5-lite" {
+		t.Errorf("orAbsent left the value untouched? got %q", got)
 	}
 }

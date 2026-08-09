@@ -14,8 +14,13 @@ func assertClose(t *testing.T, label string, got, want float64) {
 	}
 }
 
-// groupableRecord is a record whose five key fields are all set, so a test can
-// vary exactly one of them and see whether it splits the group.
+// groupableRecord is a record whose key fields are all set, so a test can vary
+// exactly one of them and see whether it splits the group.
+//
+// RerankModel is deliberately left empty: it is the arm-2 record the rest of the
+// suite is built on, and arm 2 does not rerank. That empty value is also what a
+// record written before the field existed decodes to, so the collapse test above
+// doubles as the "other arms are unaffected" expectation.
 func groupableRecord(runID string) RunRecord {
 	return RunRecord{
 		RunID:           runID,
@@ -42,14 +47,15 @@ func TestGroupRunsCollapsesIdenticalConfigurations(t *testing.T) {
 	}
 }
 
-// Each of the five key fields must split a group on its own. Two runs that
-// differed in any of them are two experiments, and averaging across them would
-// report a real difference as if it were noise.
+// Each key field must split a group on its own. Two runs that differed in any of
+// them are two experiments, and averaging across them would report a real
+// difference as if it were noise.
 func TestGroupRunsSplitsOnEveryKeyField(t *testing.T) {
 	cases := map[string]func(*RunRecord){
 		"arm":               func(r *RunRecord) { r.Arm = 3 },
 		"git_sha":           func(r *RunRecord) { r.GitSHA = "deadbee" },
 		"model":             func(r *RunRecord) { r.Model = "claude-sonnet-5" },
+		"rerank_model":      func(r *RunRecord) { r.RerankModel = "rerank-2.5" },
 		"dataset_hash":      func(r *RunRecord) { r.DatasetHash = "ffffffffffff" },
 		"corpus_index_hash": func(r *RunRecord) { r.CorpusIndexHash = "eeeeeeeeeeee" },
 	}
@@ -79,6 +85,27 @@ func TestGroupRunsGroupsRunsWithoutACorpusIndex(t *testing.T) {
 	groups := groupRuns([]RunRecord{first, second})
 	if len(groups) != 1 || groups[0].N != 2 {
 		t.Fatalf("arm-0 runs did not group on their shared absent index: %+v", groups)
+	}
+}
+
+// Issue #39's acceptance criterion, in its own terms: two arm-4 runs that differ
+// only in the cross-encoder are two experiments. Before the key carried the
+// rerank model they collapsed into one row, whose mean silently averaged across
+// two different rankers.
+func TestGroupRunsSplitsArm4RunsByRerankModel(t *testing.T) {
+	first := groupableRecord("20260806T084423Z-arm-4")
+	first.Arm, first.RerankModel = 4, "rerank-2.5"
+	second := groupableRecord("20260806T085514Z-arm-4")
+	second.Arm, second.RerankModel = 4, "rerank-2.5-lite"
+
+	groups := groupRuns([]RunRecord{first, second})
+	if len(groups) != 2 {
+		t.Fatalf("two rerank models produced %d groups, want 2: %+v", len(groups), groups)
+	}
+	for _, g := range groups {
+		if g.N != 1 {
+			t.Errorf("group %+v has n=%d, want 1", g.Key, g.N)
+		}
 	}
 }
 

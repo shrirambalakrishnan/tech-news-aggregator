@@ -10,6 +10,7 @@ import (
 
 	"github.com/shrirambalakrishnan/tech-news/claudeapi"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/voyageapi"
 )
 
 // withStubbedRecording points EVAL_RUNS_DIR at a temp dir and pins the clock and
@@ -198,5 +199,91 @@ func TestRunRecordCorpusIndexHashPresence(t *testing.T) {
 				t.Error("dataset_hash must be present for every arm")
 			}
 		})
+	}
+}
+
+// TestBuildRunRecordRecordsRerankModel pins which arms name a cross-encoder.
+// Only arm 4 reranks, so only its record may claim one; a value on any other arm
+// would attribute a ranking step that never ran. This is also the only test
+// armUsesReranker needs - it has exactly one caller, and the field it gates is
+// what is asserted here.
+func TestBuildRunRecordRecordsRerankModel(t *testing.T) {
+	withStubbedRecording(t, time.Now(), "sha")
+
+	tests := []struct {
+		name string
+		arm  hackernews_classifier.Arm
+		want string
+	}{
+		{"arm 0 does not rerank", hackernews_classifier.ArmGeneric, ""},
+		{"arm 1 does not rerank", hackernews_classifier.ArmInterests, ""},
+		{"arm 2 does not rerank", hackernews_classifier.ArmRAG, ""},
+		{"arm 3 does not rerank", hackernews_classifier.ArmRAGPerStory, ""},
+		{"arm 4 reranks", hackernews_classifier.ArmRerank, voyageapi.VOYAGE_RERANK_MODEL},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			record, err := buildRunRecord("run-1", test.arm, runArtifacts{DatasetHash: "d"}, Metrics{})
+			if err != nil {
+				t.Fatalf("buildRunRecord returned error: %v", err)
+			}
+			if record.RerankModel != test.want {
+				t.Errorf("RerankModel = %q, want %q", record.RerankModel, test.want)
+			}
+		})
+	}
+}
+
+// TestRunRecordRerankModelAbsentForNonRerankArms is acceptance criterion 1
+// ("arm 0-3 records are unchanged"), asserted on the marshalled BYTES rather
+// than the struct field: only the key's absence proves omitempty is doing its
+// job, and an arm-0 record that gained a `"rerank_model": ""` line would read as
+// a run that reranked with nothing.
+func TestRunRecordRerankModelAbsentForNonRerankArms(t *testing.T) {
+	withStubbedRecording(t, time.Now(), "sha")
+
+	arms := []hackernews_classifier.Arm{
+		hackernews_classifier.ArmGeneric,
+		hackernews_classifier.ArmInterests,
+		hackernews_classifier.ArmRAG,
+		hackernews_classifier.ArmRAGPerStory,
+	}
+
+	for _, arm := range arms {
+		record, err := buildRunRecord("run-1", arm, runArtifacts{DatasetHash: "d"}, Metrics{})
+		if err != nil {
+			t.Fatalf("arm %d: buildRunRecord returned error: %v", arm, err)
+		}
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("arm %d: marshal failed: %v", arm, err)
+		}
+
+		var fields map[string]any
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatalf("arm %d: unmarshal failed: %v", arm, err)
+		}
+		if _, present := fields["rerank_model"]; present {
+			t.Errorf("arm %d: rerank_model must be absent, got %s", arm, data)
+		}
+	}
+
+	record, err := buildRunRecord("run-1", hackernews_classifier.ArmRerank,
+		runArtifacts{DatasetHash: "d", CorpusIndexHash: "i"}, Metrics{})
+	if err != nil {
+		t.Fatalf("buildRunRecord returned error: %v", err)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if got := fields["rerank_model"]; got != voyageapi.VOYAGE_RERANK_MODEL {
+		t.Errorf("arm 4 rerank_model = %v, want %q", got, voyageapi.VOYAGE_RERANK_MODEL)
 	}
 }

@@ -243,6 +243,10 @@ Comparing two runs is a `join` on `story_id` between their CSVs.
 }
 ```
 
+An arm-4 record carries one field more — `"rerank_model": "rerank-2.5"`, the
+cross-encoder that ranked its excerpts. Changing it re-bases every arm-4 number,
+the same way changing `model` re-bases every number.
+
 **Why the hashes.** The two inputs that decide the numbers — the labelled dataset
 and `profile/corpus_index.json` — are both git-ignored and overwritten in place.
 Approach 5 re-based every arm 2 and arm 3 number by re-embedding a widened
@@ -251,7 +255,7 @@ first. So each run archives its inputs content-addressed:
 
 ```
 evalRuns/datasets/<sha256>.json       # the labelled dataset it scored against
-evalRuns/corpus_index/<sha256>.json   # the index it retrieved from (arms 2 & 3)
+evalRuns/corpus_index/<sha256>.json   # the index it retrieved from (arms 2, 3 & 4)
 ```
 
 Write-if-absent, so repeat runs over unchanged inputs add nothing; a *changed*
@@ -262,6 +266,9 @@ archives the index too, which captures it at build time rather than at first
 eval.
 
 `corpus_index_hash` is **absent** for arms 0 and 1 — they never load the index.
+`rerank_model` is **absent** for arms 0–3 — they never rerank. In both cases the
+field is omitted rather than written empty: an empty string reads as "used an
+empty index" / "reranked with nothing" rather than "did not use one".
 
 Two limitations worth knowing before trusting a record:
 
@@ -289,21 +296,21 @@ makes no API call, and **writes nothing**.
 ```
 === Eval runs (4) ===
 
-run_id                  arm  git_sha  dataset_hash  corpus_index  model                      TP  FP   TN   FN  precision  recall
-20260806T084423Z-arm-2  2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  24  79   227  11  0.2330     0.6857
-20260806T085514Z-arm-2  2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  21  82   224  14  0.2039     0.6000
-20260806T090351Z-arm-0  0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  17  117  189  18  0.1269     0.4857
-20260806T090525Z-arm-3  3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  20  70   236  15  0.2222     0.5714
+run_id                  arm  git_sha  dataset_hash  corpus_index  model                      rerank_model  TP  FP   TN   FN  precision  recall
+20260806T084423Z-arm-2  2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  —             24  79   227  11  0.2330     0.6857
+20260806T085514Z-arm-2  2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  —             21  82   224  14  0.2039     0.6000
+20260806T090351Z-arm-0  0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  —             17  117  189  18  0.1269     0.4857
+20260806T090525Z-arm-3  3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  —             20  70   236  15  0.2222     0.5714
 
-=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — 3 groups ===
+=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — 3 groups ===
 
-arm  git_sha  dataset_hash  corpus_index  model                      n  TP    FP     TN     FN    precision        recall
-2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  2  22.5  80.5   225.5  12.5  0.2184 ± 0.0206  0.6429 ± 0.0606
-0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  1  17.0  117.0  189.0  18.0  0.1269           0.4857
-3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  1  20.0  70.0   236.0  15.0  0.2222           0.5714
+arm  git_sha  dataset_hash  corpus_index  model                      rerank_model  n  TP    FP     TN     FN    precision        recall
+2    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  —             2  22.5  80.5   225.5  12.5  0.2184 ± 0.0206  0.6429 ± 0.0606
+0    1b4a0be  a59941fa34f7  —             claude-haiku-4-5-20251001  —             1  17.0  117.0  189.0  18.0  0.1269           0.4857
+3    1b4a0be  a59941fa34f7  3daf2eee4e65  claude-haiku-4-5-20251001  —             1  20.0  70.0   236.0  15.0  0.2222           0.5714
 
 === Per-story stability — arm 2, 1b4a0be, dataset a59941fa34f7,
-     index 3daf2eee4e65, claude-haiku-4-5-20251001 (n=2 runs) ===
+     index 3daf2eee4e65, claude-haiku-4-5-20251001, rerank — (n=2 runs) ===
 
                   never     sometimes  always
                   (0 of 2)  (1 of 2)   (2 of 2)
@@ -313,12 +320,17 @@ irrelevant (296)  211       11         74
 
 - **Table 1** — one row per run, sorted by `run_id` (chronological by
   construction). `git_sha` is abbreviated to 7 so it pastes into `git show`; the
-  content hashes to 12, enough to name one archived file. The model is printed in
-  full — it is a grouping key, and truncating it could make two different models
-  look like one.
+  content hashes to 12, enough to name one archived file. Both models are printed
+  in full — they are grouping keys, and abbreviating one would print a value that
+  is not the thing it keys on (`rerank-2.5-lite` truncated to the 12-character
+  hash width is `rerank-2.5-l`, a model that does not exist). `rerank_model` shows
+  `—` on arms 0–3, which never rerank — **and on the one arm-4 run recorded before
+  issue #39 added the field**, `20260809T094948Z-arm-4`. Records cannot be
+  back-filled, so on an arm-4 row read `—` as "written before #39" (it ran under
+  `rerank-2.5`), not as "did not rerank".
 - **Table 2** — one row per *configuration*: runs are repeats of the same
-  experiment only if they shared all five of arm, commit, model, dataset and
-  corpus index. Counts are means; precision and recall carry the **sample**
+  experiment only if they shared all six of arm, commit, model, rerank model,
+  dataset and corpus index. Counts are means; precision and recall carry the **sample**
   standard deviation (n−1 denominator — the runs are draws from a
   non-deterministic process, not a complete population).
 - **`±` appears only when it was measured.** At n=1 there is no spread, so no `±`

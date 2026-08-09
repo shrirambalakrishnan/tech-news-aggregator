@@ -16,9 +16,10 @@ import (
 // spread (0.343 ± 0.076), and it was computed by hand.
 //
 // Grouping is what makes the spread meaningful: two runs are repeats of the same
-// experiment only if they shared the arm, the code, the model, the dataset and
-// the corpus index. Any of those differing makes them two experiments, and
-// averaging across them would report a difference as if it were noise.
+// experiment only if they shared the arm, the code, the model, the rerank model,
+// the dataset and the corpus index. Any of those differing makes them two
+// experiments, and averaging across them would report a difference as if it were
+// noise.
 //
 // Everything here is PURE - no I/O - for the same reason Evaluate is: the
 // statistics are the part worth unit-testing against hand-computed numbers.
@@ -28,13 +29,17 @@ import (
 // in a joined key is one model name away from colliding two configurations into
 // one row, and a collision here silently understates variance.
 //
-// CorpusIndexHash is empty for arms 0 and 1, which never load the index. That
-// empty value groups them together correctly - they genuinely share "no index" as
-// a configuration - and is rendered as absent, not as a value, at print time.
+// CorpusIndexHash is empty for arms 0 and 1, which never load the index, and
+// RerankModel is empty for arms 0-3, which never rerank. Those empty values group
+// their runs together correctly - they genuinely share "no index" / "no reranker"
+// as a configuration - and are rendered as absent, not as a value, at print time.
+// Records written before the rerank model was recorded decode to "" too, so they
+// group exactly as they did before the field existed.
 type runGroupKey struct {
 	Arm             int
 	GitSHA          string
 	Model           string
+	RerankModel     string
 	DatasetHash     string
 	CorpusIndexHash string
 }
@@ -104,6 +109,7 @@ func groupRuns(records []RunRecord) []runGroup {
 			Arm:             r.Arm,
 			GitSHA:          r.GitSHA,
 			Model:           r.Model,
+			RerankModel:     r.RerankModel,
 			DatasetHash:     r.DatasetHash,
 			CorpusIndexHash: r.CorpusIndexHash,
 		}
@@ -167,6 +173,9 @@ func sortGroups(groups []runGroup) {
 		}
 		if a.Key.Model != b.Key.Model {
 			return a.Key.Model < b.Key.Model
+		}
+		if a.Key.RerankModel != b.Key.RerankModel {
+			return a.Key.RerankModel < b.Key.RerankModel
 		}
 		if a.Key.DatasetHash != b.Key.DatasetHash {
 			return a.Key.DatasetHash < b.Key.DatasetHash

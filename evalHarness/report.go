@@ -134,17 +134,19 @@ func stabilityForGroup(g runGroup) (stabilityTable, error) {
 }
 
 // stabilityHeader names the configuration in full, over two lines so it fits a
-// terminal. The model is NOT abbreviated, for the same reason it is not in the
-// groups table: it is a grouping key, and truncating it could make two different
-// models look like one configuration.
+// terminal. Neither model is abbreviated, for the same reason they are not in the
+// groups table: both are grouping keys, and truncating one could make two
+// different models look like one configuration. The rerank model is absent for
+// every arm but 4, and renders as ABSENT_VALUE rather than as a blank.
 func stabilityHeader(g runGroup) string {
 	return fmt.Sprintf(
-		"=== Per-story stability — arm %d, %s, dataset %s,\n     index %s, %s (n=%d runs) ===",
+		"=== Per-story stability — arm %d, %s, dataset %s,\n     index %s, %s, rerank %s (n=%d runs) ===",
 		g.Key.Arm,
 		shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN),
 		shortHash(g.Key.DatasetHash, CONTENT_HASH_SHORT_LEN),
 		shortHash(g.Key.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
 		g.Key.Model,
+		orAbsent(g.Key.RerankModel),
 		g.N,
 	)
 }
@@ -218,15 +220,16 @@ func formatRunsTable(records []RunRecord) string {
 	var b strings.Builder
 	w := newTableWriter(&b)
 
-	fmt.Fprintln(w, "run_id\tarm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\tTP\tFP\tTN\tFN\tprecision\trecall")
+	fmt.Fprintln(w, "run_id\tarm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\trerank_model\tTP\tFP\tTN\tFN\tprecision\trecall")
 	for _, r := range records {
-		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%.4f\t%.4f\n",
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%.4f\t%.4f\n",
 			r.RunID,
 			r.Arm,
 			shortHash(r.GitSHA, GIT_SHA_SHORT_LEN),
 			shortHash(r.DatasetHash, CONTENT_HASH_SHORT_LEN),
 			shortHash(r.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
 			r.Model,
+			orAbsent(r.RerankModel),
 			r.Metrics.TP, r.Metrics.FP, r.Metrics.TN, r.Metrics.FN,
 			r.Metrics.Precision, r.Metrics.Recall,
 		)
@@ -246,7 +249,7 @@ func groupsHeader(groups int) string {
 		noun = "group"
 	}
 	return fmt.Sprintf(
-		"=== Grouped by (arm, git_sha, model, dataset_hash, corpus_index_hash) — %d %s ===",
+		"=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — %d %s ===",
 		groups, noun,
 	)
 }
@@ -262,14 +265,15 @@ func formatGroupsTable(groups []runGroup) string {
 	var b strings.Builder
 	w := newTableWriter(&b)
 
-	fmt.Fprintln(w, "arm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\tn\tTP\tFP\tTN\tFN\tprecision\trecall")
+	fmt.Fprintln(w, "arm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\trerank_model\tn\tTP\tFP\tTN\tFN\tprecision\trecall")
 	for _, g := range groups {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\t%s\n",
 			g.Key.Arm,
 			shortHash(g.Key.GitSHA, GIT_SHA_SHORT_LEN),
 			shortHash(g.Key.DatasetHash, CONTENT_HASH_SHORT_LEN),
 			shortHash(g.Key.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
 			g.Key.Model,
+			orAbsent(g.Key.RerankModel),
 			g.N,
 			g.MeanTP, g.MeanFP, g.MeanTN, g.MeanFN,
 			formatAggregate(g.Precision),
@@ -300,6 +304,23 @@ func formatAggregate(a aggregate) string {
 // output is meant to be read in a terminal and pasted into an issue.
 func newTableWriter(b *strings.Builder) *tabwriter.Writer {
 	return tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+}
+
+// orAbsent renders a field that has no value as ABSENT_VALUE, leaving anything
+// else untouched.
+//
+// It is deliberately NOT shortHash with a large width: shortHash truncates, and
+// rerank-2.5-lite is 15 characters against the 12-character hash width, so
+// reusing it would print "rerank-2.5-l" - a model id Voyage does not have, with
+// the exact suffix that separates it from rerank-2.5 cut off. None of Voyage's
+// six rerank ids actually collide at 12 characters, so the failure is a mangled
+// value rather than an ambiguous one; a grouping key must render as the thing it
+// keys on either way.
+func orAbsent(s string) string {
+	if s == "" {
+		return ABSENT_VALUE
+	}
+	return s
 }
 
 // shortHash abbreviates a hash to n characters, and renders an absent one as
