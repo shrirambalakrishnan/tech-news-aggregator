@@ -19,7 +19,7 @@ import (
 // real evalRuns/ directory to the console.
 var runEvalReportCommand = evalHarness.RunEvalReport
 
-// parseArm converts a CLI argument into an Arm. Only the valid arms (0-3) are
+// parseArm converts a CLI argument into an Arm. Only the valid arms (0-4) are
 // accepted; anything else errors so a typo can't silently fall through to a
 // default flow.
 func parseArm(s string) (hackernews_classifier.Arm, error) {
@@ -29,10 +29,11 @@ func parseArm(s string) (hackernews_classifier.Arm, error) {
 	}
 	switch hackernews_classifier.Arm(n) {
 	case hackernews_classifier.ArmGeneric, hackernews_classifier.ArmInterests,
-		hackernews_classifier.ArmRAG, hackernews_classifier.ArmRAGPerStory:
+		hackernews_classifier.ArmRAG, hackernews_classifier.ArmRAGPerStory,
+		hackernews_classifier.ArmRerank:
 		return hackernews_classifier.Arm(n), nil
 	default:
-		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG, 3=RAG per-story)", n)
+		return 0, fmt.Errorf("unknown arm: %d (valid: 0=generic, 1=interests, 2=RAG, 3=RAG per-story, 4=RAG per-story + rerank)", n)
 	}
 }
 
@@ -150,7 +151,7 @@ func runCalibrateFloor() error {
 // that have already been paid for.
 func runEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG, 3=RAG per-story)")
+		return fmt.Errorf("eval requires an arm: `go run . eval <arm>` (0=generic, 1=interests, 2=RAG, 3=RAG per-story, 4=RAG per-story + rerank)")
 	}
 	arm, err := parseArm(args[0])
 	if err != nil {

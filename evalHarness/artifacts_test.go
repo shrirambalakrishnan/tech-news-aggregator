@@ -155,6 +155,7 @@ func TestArmUsesCorpusIndex(t *testing.T) {
 		{hackernews_classifier.ArmInterests, false},
 		{hackernews_classifier.ArmRAG, true},
 		{hackernews_classifier.ArmRAGPerStory, true},
+		{hackernews_classifier.ArmRerank, true},
 	}
 	for _, test := range tests {
 		if got := armUsesCorpusIndex(test.arm); got != test.want {

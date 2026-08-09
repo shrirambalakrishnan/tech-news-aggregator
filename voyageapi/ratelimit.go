@@ -28,7 +28,7 @@ var (
 	VOYAGE_MIN_REQUEST_GAP      = 20 * time.Second // >= this between requests => <= 3 RPM
 	VOYAGE_RATE_SAFETY          = 1.10             // pad token-paced sleeps for estimate error
 	VOYAGE_MAX_RETRIES          = 6
-	VOYAGE_RETRY_BACKOFF        = 30 * time.Second // grows linearly per attempt
+	VOYAGE_RETRY_BACKOFF        = 60 * time.Second // grows linearly per attempt (1min, 2min, 3min, ...)
 )
 
 // RateLimitError marks an HTTP 429 so the retry loop can back off and retry,
@@ -89,8 +89,31 @@ func pacingDelay(batchTokens int) time.Duration {
 	return d
 }
 
+// pace waits out the delay owed after a request of batchTokens, announcing it
+// first. `what` names the next request ("rerank request", "embed batch").
+//
+// The announcement is the point. A paced run's normal behaviour is minutes of
+// silence, which looks exactly like a hung connection — the last thing printed
+// is the request that already succeeded, so the wait appears to belong to it.
+// The line names the delay and both numbers it is computed from, which are the
+// two vars to change (VOYAGE_TPM_LIMIT, VOYAGE_MIN_REQUEST_GAP) after adding a
+// payment method on the Voyage dashboard lifts the throttle.
+//
+// A zero delay logs nothing: that is the configuration where pacing has been
+// deliberately switched off (tests, or a paid account), and a line per request
+// saying it waited no time is noise.
+func pace(what string, batchTokens int) {
+	delay := pacingDelay(batchTokens)
+	if delay <= 0 {
+		return
+	}
+	log.Printf("voyage: pacing %s before the next %s — %d tokens against a %d/min budget",
+		delay.Round(time.Second), what, batchTokens, VOYAGE_TPM_LIMIT)
+	time.Sleep(delay)
+}
+
 // embedBatchWithRetry calls embedBatch, retrying on 429s with linear backoff
-// (30s, 60s, 90s, ...). Only rate limits are retried — they are transient by
+// (1min, 2min, 3min, ...). Only rate limits are retried — they are transient by
 // definition (wait long enough and the budget refills); any other error is
 // returned immediately since retrying wouldn't change the outcome.
 func embedBatchWithRetry(texts []string, inputType string) ([][]float32, error) {
