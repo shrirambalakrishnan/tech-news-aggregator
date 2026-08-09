@@ -363,7 +363,7 @@ Rows are labelled by **arm** (the CLI argument), since the "Approach N" numberin
 above is offset by one and would collide here. **One row per run** — add a new row
 for each result rather than widening the table.
 
-The last two rows were run against the **post-notes** corpus (Approach 5); every
+The last four rows were run against the **post-notes** corpus (Approach 5); every
 other row was measured against the pre-notes index.
 
 #### Confusion matrix
@@ -377,7 +377,7 @@ other row was measured against the pre-notes index.
 | Arm 2 (RAG, blended query + notes) | 22 | 80 | 226 | 13 |
 | Arm 3 (RAG, per-story + notes) | 19 | 76 | 230 | 16 |
 | Arm 3 (RAG, per-story + notes + similarity_floor) | 19 | 83 | 223 | 16 |
-| Arm 4 (RAG, per-story + notes + rerank) | — | — | — | — |
+| Arm 4 (RAG, per-story + notes + rerank) | 17 | 72 | 234 | 18 |
 
 #### Metrics
 
@@ -390,7 +390,7 @@ other row was measured against the pre-notes index.
 | Arm 2 (RAG, blended query + notes) | 0.2157 | 0.6286 |
 | Arm 3 (RAG, per-story + notes) | 0.2000 | 0.5429 |
 | Arm 3 (RAG, per-story + notes + similarity_floor) | 0.1863 | 0.5429 |
-| Arm 4 (RAG, per-story + notes + rerank) | — | — |
+| Arm 4 (RAG, per-story + notes + rerank) | 0.1910 | 0.4857 |
 
 #### Reading the results
 
@@ -557,13 +557,18 @@ arm 2 vs arm 3 re-run above (~$0.16 total, and the only way to attribute that
 delta — note it must be re-run against the post-notes index, since arm 3's tabled
 numbers are now stale); then smaller chunks (currently 800 words — a ~9-word
 title averaged against an 800-word window dilutes the signal, and re-testing at
-the retrieval layer via `calibrate-floor` is free); then reranking — **now built
-as arm 4, see below**.
+the retrieval layer via `calibrate-floor` is free). Reranking was the last lever
+on this list and has now been **measured and did not pay off** — and arm 4's log
+shows why that matters beyond arm 4: it lifted retrieval ranking quality from AUC
+0.698 to **0.794** and classification did not improve at all. **Ranking quality
+and classification quality are decoupled on this dataset**, which devalues every
+remaining ranking lever on this list and strengthens the case for corpus coverage
+— still the only lever with a delta that clears the noise.
 
-#### Arm 4 (reranking) is built but NOT measured
+#### Arm 4 (reranking) missed its acceptance line and did not beat arm 2
 
-The arm-4 row above is blank on purpose. Nothing about reranking has been scored;
-`go run . eval 4` has not been run. Do not read the row as a null result.
+Scored once — run `20260809T094948Z-arm-4`, commit `726415c`, post-notes index
+`3daf2eee4e65`. **17 / 72 / 234 / 18 → precision 0.1910, recall 0.4857.**
 
 **Its baseline is the `Arm 3 (RAG, per-story + notes)` row — 19 / 76 / 230 / 16,
 precision 0.2000, recall 0.5429 — not the floored row below it.** That is a
@@ -572,31 +577,126 @@ Arm 4 uses a permissive candidate floor and keeps 2 chunks from each of ~30
 stories, so its pool should land near the no-floor arm 3 run's measured **18.9
 excerpts per call**; arm 3 *at HEAD*, with `RETRIEVAL_SIMILARITY_FLOOR` = 0.3330,
 runs at **7.1**. Comparing against the floored row would compare two things at
-once again.
+once again. Issue #27's acceptance criteria (FP ≤ 76, precision ≥ 0.2000, recall
+≥ 0.5429) *are* that baseline row exactly, so they are cleared by an exact tie —
+a result on the line means "did not lose ground", not "beat arm 3".
 
-The cost of that choice: the comparison is **cross-commit and n=1 on both sides**.
-Re-running arm 3 volume-matched as a fresh baseline is the fix, and is worth
-paying for only if arm 4 lands near the acceptance line. If it is taken, the floor
-change must be **committed first** — `git_sha` on the run record is HEAD, not the
-working tree.
+| criterion | target | arm 4 | |
+|--|--|--|--|
+| FP | ≤ 76 | 72 | met |
+| precision | ≥ 0.2000 | 0.1910 | missed |
+| recall | ≥ 0.5429 | 0.4857 | missed |
 
-**Check the logged pooled count before reading any delta.** Arm 4 logs
-`rag: arm 4 pooled N excerpts` per call. If N is not near 18.9, the comparison is
-not volume-matched and the delta is confounded — this document records twice that
-assuming a pool size instead of counting it produced a wrong conclusion.
+One of three, and the one it met is the one that is cheap to meet by flagging
+less. Against arm 3 the deltas (−3 TP, −2 FP) are well inside the ~8pp standard
+error on recall at 35 positives, so the defensible claim is **"reranking did not
+help"**, not "reranking hurt".
 
-Issue #27's acceptance criteria (FP ≤ 76, precision ≥ 0.2000, recall ≥ 0.5429)
-*are* that baseline row exactly, so they are cleared by an exact tie. A result on
-the line means **"did not lose ground"**, not "beat arm 3". At 35 positives the
-standard error on recall is ~8pp, so anything under ~1 SE is noise.
+**Against arm 2 the per-story join says more than the counts.** Five post-notes
+arm-2 runs (across two commits, `1b4a0be` ×2 and `74f5520` ×3, same dataset and
+index) give recall **0.629 ± 0.035** and precision **0.2205 ± 0.011**. Arm 4 sits
+14.3pp below on recall — ~1.7 SE, suggestive rather than decisive at n=1 — but
+joining the prediction CSVs on `story_id` is blunter: **all 17 of arm 4's true
+positives are inside the union of arm 2's**, so it found nothing arm 2 does not,
+and it **missed 4 stories that all five arm-2 runs caught**. It is a smaller
+subset, not a different trade. Arm 4 and arm 3 agreed on 74 of ~88 flagged
+stories, so reranking reordered the excerpts and moved the verdicts only
+marginally — net in the wrong direction.
 
-The run also dumps every kept (story, chunk) pair's cosine **and** rerank score to
-the log (`rag: rerank-score,<query>,<source>,<chunk_index>,<cosine>,<rerank>,<kept>`)
-— **all 6 per story, not just the 2 kept**, since no `top_k` is sent and the
-discarded scores cost nothing extra. Those lines are the input to a future
-rerank-floor experiment, and a floor is a decision about where to cut, so it
-needs both sides of the current cut. Grab them from the run log before it is
-lost; the alternative is paying for a second ~5h run.
+For scale at the other end: arm 4 ties the **static** arm-0 row's recall exactly
+(0.4857, the same 17 TP / 18 FN), winning only on precision by flagging 88 rather
+than 133. Five hours and ~$0.29 to match the free baseline on recall.
+
+**The excerpt volume checks out — this comparison is NOT the Approach 4
+confound.** The run log (`eval-run-logs/eval-4-run-post-notes`) records
+`rag: arm 4 pooled 20 excerpts (cap 20) from 30 of 30 stories` for all eleven
+full batches and 11 for the short twelfth — **231 excerpts, mean 19.25 per call,
+against arm 3's no-floor 227 / 18.9.** Volume-matched to within 2%, so the delta
+is attributable to ranking, which is what arm 4 was built to isolate. This is the
+first arm comparison in this document where that is true rather than assumed.
+
+#### What the rerank score dump says (2,046 scored pairs, recovered from the log)
+
+The run dumps every scored `(story, chunk)` pair's cosine **and** rerank score —
+all 6 candidates per story, not just the 2 kept, since no `top_k` is sent. That
+is 2,046 lines over 329 distinct titles, and it is what makes the following free
+rather than a second ~5h run. Titles join to the labelled set at 322/329 (34 of
+the 35 positives; 7 titles do not match and are dropped from the label-joined
+numbers below).
+
+**1. The cross-encoder really did reorder — this is not a null from inaction.**
+Only **76 of 329 stories (23.1%)** kept the same top-2 that cosine would have
+chosen; 77% changed, with 324 chunks swapped in. Mean within-story Spearman
+correlation between the two rankings is **0.261** — they barely agree.
+
+**2. And it reordered *better*. On the same 6 candidates, ranking quality rises
+sharply:**
+
+| story-level signal | AUC | d′ |
+|--|--|--|
+| best cosine of 6 | 0.698 | 0.778 |
+| **best rerank of 6** | **0.794** | **1.039** |
+| mean rerank of the 2 kept | 0.786 | 1.077 |
+
+(Cosine measures better here than the 0.659 / 0.635 `calibrate-floor` recorded,
+because that figure was taken on the **pre-notes** index.)
+
+**This is the result worth keeping.** Retrieval ranking improved by a wide,
+measurable margin and end-to-end classification did not improve at all. Those two
+things are decoupled here, which contradicts the assumption behind the whole
+Approach 4 → 6 sequence: that better excerpt selection buys better
+classification. The bottleneck is downstream of ranking — in how the classifier
+uses excerpts, or in corpus coverage — not in the ordering. **10 of the 35
+relevant stories were caught by no run in any row of the table**, which no
+ranking stage can lift.
+
+**3. `RETRIEVAL_POOL_CAP` is already acting as a rerank floor at ~0.28 — the
+third time an existing knob has dominated a proposed one.** Per batch, 60 kept
+candidates dedupe to only 24–38 distinct chunks (682 → 347 overall), and
+truncating that to 20 cuts at the 20th-ranked score:
+
+| | mean | range |
+|--|--|--|
+| effective rerank floor imposed by the cap | **0.2805** | 0.2500 – 0.3125 |
+
+A floor sweep over the kept excerpts agrees: below ~0.25 nothing is filtered
+(99.9% survive), and 0.28 is where the cap is already cutting. **So any
+`RERANK_SCORE_FLOOR` below ~0.28 is inert by construction** — exactly what
+happened to `RETRIEVAL_SIMILARITY_FLOOR` (0.2336 best available, ~0.32 already
+enforced by the cap). Above it, a floor does bite, and the asymmetry is real —
+at 0.25, 50 stories lose all excerpt context, only **1 of them relevant against
+49 irrelevant** — but it bites by *removing volume*, which reopens the confound
+this run just closed. The cap is also cutting at a near-tie: the highest dropped
+chunk scores within 0.001–0.03 of the lowest kept one, so the truncation is mild
+and not obviously discarding signal.
+
+**4. The reranker demotes the reading notes — a hypothesis for the recall drop,
+not a finding.** Pooled excerpt slots (231 across 12 batches, 107 distinct chunks
+ever pooled) are dominated by white papers: `chubby-osdi06` 15.2%,
+`bigtable-osdi06` 10.0%, `dynamo` 8.7%, `scaling-memcached` 6.5%, `hlc-new` 6.1%,
+`spanner` 3.5%. The two `note-from-blogs-*` chunks take **10.4% combined**.
+Approach 5 measured those same two notes taking the **top-1 cosine slot for 46%**
+of titles, and reading notes are the largest recorded gain in this document — so
+"the cross-encoder undoes the notes displacement that produced Approach 5's win"
+is a plausible mechanism for arm 4 scoring below arm 2. **It is not established.**
+The two figures are different measurements (top-1 cosine vs pooled top-20
+rerank), and arm 3's log predates per-chunk logging, so the cosine-side pooled
+composition needed for a like-for-like comparison does not exist. Testing it means
+re-running with per-chunk logging on arm 3. This document records three times that
+a pre-run mechanism story stated as fact turned out wrong; this one is labelled a
+hypothesis on purpose.
+
+The comparison is also **cross-commit and n=1 on both sides** (arm 4 at
+`726415c`, arm 3 at `1b4a0be`). Re-running arm 3 volume-matched as a fresh
+baseline was to be paid for only if arm 4 landed near the acceptance line; it did
+not, so that spend is not indicated. If it is ever taken, the floor change must be
+**committed first** — `git_sha` on the run record is HEAD, not the working tree.
+
+> **Unrelated, but on the same commit: the `20260809T094404Z-arm-0` record
+> (0 / 0 / 306 / 35) is a broken run, not a measurement.** It flagged nothing at
+> all, which is the silent parse-failure signature — an unparseable response makes
+> `ClassifyTechNewsStory` return `[]` and recall score 0. Exclude it from any
+> arm-0 aggregate; `eval-report` cannot tell it apart from a real run.
 
 ## Setup
 
