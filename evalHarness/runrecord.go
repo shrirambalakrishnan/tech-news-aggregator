@@ -11,6 +11,7 @@ import (
 
 	"github.com/shrirambalakrishnan/tech-news/claudeapi"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/voyageapi"
 )
 
 // This file records WHAT an eval run used, so a number in the README can be
@@ -69,13 +70,24 @@ type RunMetrics struct {
 //     text). This is why a tuning change must be committed to be recorded -
 //     see headCommitSHA for the limitation that leaves.
 //   - Model    - the LLM that classified. Changing it re-bases every number.
+//   - RerankModel - the cross-encoder that ranked the excerpts (arm 4 only).
+//     Changing it re-bases every arm-4 number, the same way Model does.
 //   - DatasetHash / CorpusIndexHash - the data, which is git-ignored and mutable
 //     in place. Each hash names an archived copy under evalRuns/, so the bytes
 //     behind a past number are still recoverable. See artifacts.go.
 //
-// CorpusIndexHash is omitted entirely for arms 0 and 1: they never load the
-// index, and an empty string would read as "the index was empty" rather than
-// "the index was irrelevant here".
+// CorpusIndexHash and RerankModel are omitted entirely for the arms that do not
+// use them: arms 0 and 1 never load the index, arms 0-3 never rerank, and an
+// empty string would read as "the index was empty" / "an empty rerank model was
+// used" rather than "this was irrelevant here".
+//
+// RerankModel is worth recording even though voyageapi.VOYAGE_RERANK_MODEL is a
+// compile-time const rather than a git-ignored data file - so for a COMMITTED
+// change GitSHA already splits the two runs into different groups. It earns its
+// place the same way Model does (equally const-pinned, equally recorded): a
+// reader can see which cross-encoder ranked the excerpts without checking out
+// the commit, and the grouping key stops implying the reranker was held
+// constant across arm-4 runs.
 type RunRecord struct {
 	RunID           string     `json:"run_id"`
 	Arm             int        `json:"arm"`
@@ -83,7 +95,20 @@ type RunRecord struct {
 	DatasetHash     string     `json:"dataset_hash"`
 	CorpusIndexHash string     `json:"corpus_index_hash,omitempty"`
 	Model           string     `json:"model"`
+	RerankModel     string     `json:"rerank_model,omitempty"`
 	Metrics         RunMetrics `json:"metrics"`
+}
+
+// armUsesReranker reports whether an arm ranks its excerpts with a
+// cross-encoder, and so whether its record should name one.
+//
+// ⚠️ Like armUsesCorpusIndex, it mirrors armcontext.BuildProfile's cases and
+// must be updated alongside them: an arm that reranks but is missing here would
+// publish numbers whose ranking side is untraceable. It lives here rather than
+// beside armUsesCorpusIndex in artifacts.go because nothing is archived and no
+// file is hashed for it - it gates a struct field, not file I/O.
+func armUsesReranker(arm hackernews_classifier.Arm) bool {
+	return arm == hackernews_classifier.ArmRerank
 }
 
 // newRunID builds the run's identity: "<UTC timestamp>-arm-<N>". It is both the
@@ -122,6 +147,11 @@ func buildRunRecord(runID string, arm hackernews_classifier.Arm, artifacts runAr
 		return RunRecord{}, err
 	}
 
+	rerankModel := ""
+	if armUsesReranker(arm) {
+		rerankModel = voyageapi.VOYAGE_RERANK_MODEL
+	}
+
 	return RunRecord{
 		RunID:           runID,
 		Arm:             int(arm),
@@ -129,6 +159,7 @@ func buildRunRecord(runID string, arm hackernews_classifier.Arm, artifacts runAr
 		DatasetHash:     artifacts.DatasetHash,
 		CorpusIndexHash: artifacts.CorpusIndexHash,
 		Model:           claudeapi.ANTHROPIC_MODEL_NAME,
+		RerankModel:     rerankModel,
 		Metrics: RunMetrics{
 			TP:        metrics.Confusion.TP,
 			FP:        metrics.Confusion.FP,
