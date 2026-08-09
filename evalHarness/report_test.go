@@ -271,6 +271,77 @@ func TestRenderEvalReportPrintsBothSections(t *testing.T) {
 	}
 }
 
+// The legend is what keeps a fixed-width hash column readable. One entry per
+// distinct configuration - not per run - and a pre-config record says so rather
+// than sitting there as a config hash whose expansion went missing.
+func TestConfigLegendExpandsEachDistinctConfig(t *testing.T) {
+	first := groupableRecord("20260806T084423Z-arm-2")
+	repeat := groupableRecord("20260806T085514Z-arm-2")
+	other := groupableRecord("20260806T090525Z-arm-3")
+	other.Config = map[string]string{"eval_batch_size": "30", "retrieval_pool_cap": "20"}
+	legacy := groupableRecord("20260805T090000Z-arm-2")
+	legacy.Config = nil
+
+	entries := configLegend([]RunRecord{first, repeat, other, legacy})
+
+	if len(entries) != 3 {
+		t.Fatalf("got %d legend entries, want 3 (two configs + one pre-config): %+v", len(entries), entries)
+	}
+
+	var configs []string
+	for _, e := range entries {
+		configs = append(configs, e.Config)
+	}
+	joined := strings.Join(configs, "\n")
+
+	// Keys ascending, so two printings of one config always read the same.
+	if !strings.Contains(joined, "eval_batch_size=30 retrieval_top_k=5") {
+		t.Errorf("legend missing the arm-2 config, keys ascending:\n%s", joined)
+	}
+	if !strings.Contains(joined, "eval_batch_size=30 retrieval_pool_cap=20") {
+		t.Errorf("legend missing the second config:\n%s", joined)
+	}
+	if !strings.Contains(joined, PRE_CONFIG_NOTE) {
+		t.Errorf("a record with no config must say so, not render as an empty config:\n%s", joined)
+	}
+}
+
+// The display contract after issue #40: config identifies a configuration
+// everywhere, and git_sha survives only as per-run provenance. A group can now
+// span commits, so a sha printed beside a group would name one arbitrary member
+// as though it spoke for all of them.
+func TestRenderEvalReportShowsConfigEverywhereAndGitSHAPerRunOnly(t *testing.T) {
+	first := groupableRecord("20260806T084423Z-arm-2")
+	second := groupableRecord("20260807T204405Z-arm-2")
+	second.GitSHA = "74f5520deadbeef"
+	withStubbedRecords(t, []RunRecord{first, second}, nil)
+
+	out, _ := renderForTest(t)
+
+	runsTable := out[:strings.Index(out, "=== Grouped by")]
+	rest := out[strings.Index(out, "=== Grouped by"):]
+
+	// Output 1 keeps both shas: they are what a reader pastes into `git show`.
+	for _, sha := range []string{"1b4a0be", "74f5520"} {
+		if !strings.Contains(runsTable, sha) {
+			t.Errorf("Output 1 must still carry git_sha %q:\n%s", sha, runsTable)
+		}
+		if strings.Contains(rest, sha) {
+			t.Errorf("git_sha %q leaked into the grouped/stability output:\n%s", sha, rest)
+		}
+	}
+
+	// The two runs share a config, so they are one group despite the two shas.
+	if !strings.Contains(rest, "— 1 group ===") {
+		t.Errorf("two shas with one config should be one group:\n%s", rest)
+	}
+
+	config := shortHash(fingerprint(first), CONTENT_HASH_SHORT_LEN)
+	if !strings.Contains(runsTable, config) || !strings.Contains(rest, config) {
+		t.Errorf("the config fingerprint %q must appear in both tables:\n%s", config, out)
+	}
+}
+
 func TestShortHash(t *testing.T) {
 	cases := []struct {
 		in   string

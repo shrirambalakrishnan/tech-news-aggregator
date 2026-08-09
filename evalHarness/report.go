@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 )
@@ -75,6 +76,10 @@ func renderEvalReport(out, warnOut io.Writer) error {
 	fmt.Fprintf(out, "\n%s\n\n", groupsHeader(len(groups)))
 	fmt.Fprint(out, formatGroupsTable(groups))
 	fmt.Fprint(out, "\n"+GROUPS_TABLE_FOOTNOTE)
+
+	legend := configLegend(records)
+	fmt.Fprintf(out, "\n%s\n\n", configLegendHeader(len(legend)))
+	fmt.Fprint(out, formatConfigLegend(legend))
 
 	renderStabilitySections(out, warnOut, groups)
 
@@ -196,8 +201,8 @@ func runCountLabel(low, high, n int) string {
 // only group by what was recorded.
 const GROUPS_TABLE_FOOTNOTE = "" +
 	"n=1 groups show no ± — one run measures no spread.\n" +
-	"git_sha is HEAD, not the working tree: two runs sharing a sha may have run\n" +
-	"different uncommitted code, and would be grouped here as one configuration.\n" +
+	"config names the listed tuning constants only. A code change outside them —\n" +
+	"prompt wording above all — no longer splits groups, since git_sha left the key.\n" +
 	"Arm 1's profile/user_context.json is not hashed, so arm-1 rows group on a key\n" +
 	"that omits an input deciding their numbers.\n"
 
@@ -220,11 +225,12 @@ func formatRunsTable(records []RunRecord) string {
 	var b strings.Builder
 	w := newTableWriter(&b)
 
-	fmt.Fprintln(w, "run_id\tarm\tgit_sha\tdataset_hash\tcorpus_index\tmodel\trerank_model\tTP\tFP\tTN\tFN\tprecision\trecall")
+	fmt.Fprintln(w, "run_id\tarm\tconfig\tgit_sha\tdataset_hash\tcorpus_index\tmodel\trerank_model\tTP\tFP\tTN\tFN\tprecision\trecall")
 	for _, r := range records {
-		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%.4f\t%.4f\n",
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%.4f\t%.4f\n",
 			r.RunID,
 			r.Arm,
+			shortHash(fingerprint(r), CONTENT_HASH_SHORT_LEN),
 			shortHash(r.GitSHA, GIT_SHA_SHORT_LEN),
 			shortHash(r.DatasetHash, CONTENT_HASH_SHORT_LEN),
 			shortHash(r.CorpusIndexHash, CONTENT_HASH_SHORT_LEN),
@@ -233,6 +239,96 @@ func formatRunsTable(records []RunRecord) string {
 			r.Metrics.TP, r.Metrics.FP, r.Metrics.TN, r.Metrics.FN,
 			r.Metrics.Precision, r.Metrics.Recall,
 		)
+	}
+
+	w.Flush()
+	return b.String()
+}
+
+// PRE_CONFIG_NOTE is what the legend prints for a record written before issue
+// #40. Those records carry no config and cannot be back-filled, so their
+// fingerprint is their git SHA - which would otherwise sit in the legend looking
+// like a config hash whose expansion had gone missing.
+const PRE_CONFIG_NOTE = "(pre-config record — grouped by git_sha)"
+
+// configEntry is one legend row: an abbreviated fingerprint and the config it
+// stands for, already rendered.
+type configEntry struct {
+	Fingerprint string
+	Config      string
+}
+
+// configLegend expands every fingerprint appearing in the records.
+//
+// The tables show a hash because a column per constant would grow with every arm
+// and every knob - the thing issue #40 set out to avoid. But a hash alone would
+// leave the report LESS readable than it was, since the git SHA it replaced could
+// at least be pasted into `git show`. The legend is what buys the fixed table
+// width back without paying in legibility.
+//
+// Built from the records rather than the groups because it must cover Output 1
+// too, where a run appears whether or not its group prints a stability block. The
+// two sets are identical - every record is in exactly one group - so this is a
+// matter of which input is simpler, not of coverage.
+//
+// Sorted by fingerprint: the order has to be total and stable, and no order is
+// more meaningful than another for opaque hashes.
+func configLegend(records []RunRecord) []configEntry {
+	byFingerprint := map[string]string{}
+	for _, r := range records {
+		short := shortHash(fingerprint(r), CONTENT_HASH_SHORT_LEN)
+		if _, seen := byFingerprint[short]; !seen {
+			byFingerprint[short] = renderConfig(r.Config)
+		}
+	}
+
+	entries := make([]configEntry, 0, len(byFingerprint))
+	for short, config := range byFingerprint {
+		entries = append(entries, configEntry{Fingerprint: short, Config: config})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Fingerprint < entries[j].Fingerprint })
+	return entries
+}
+
+// renderConfig prints a config as "key=value key=value", keys ascending.
+//
+// Sorted for the reader's sake rather than for correctness - the fingerprint is
+// computed from the map, not from this string - but the same property matters for
+// both reasons: an unsorted render would reshuffle between invocations and make
+// two printings of one config look different.
+func renderConfig(config map[string]string) string {
+	if len(config) == 0 {
+		return PRE_CONFIG_NOTE
+	}
+
+	keys := make([]string, 0, len(config))
+	for key := range config {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, fmt.Sprintf("%s=%s", key, config[key]))
+	}
+	return strings.Join(pairs, " ")
+}
+
+func configLegendHeader(configs int) string {
+	noun := "configurations"
+	if configs == 1 {
+		noun = "configuration"
+	}
+	return fmt.Sprintf("=== %d %s ===", configs, noun)
+}
+
+// formatConfigLegend renders the legend rows.
+func formatConfigLegend(entries []configEntry) string {
+	var b strings.Builder
+	w := newTableWriter(&b)
+
+	for _, e := range entries {
+		fmt.Fprintf(w, "%s\t%s\n", e.Fingerprint, e.Config)
 	}
 
 	w.Flush()
