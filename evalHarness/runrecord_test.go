@@ -5,11 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/shrirambalakrishnan/tech-news/claudeapi"
 	"github.com/shrirambalakrishnan/tech-news/hackernews_classifier"
+	"github.com/shrirambalakrishnan/tech-news/rag"
 	"github.com/shrirambalakrishnan/tech-news/voyageapi"
 )
 
@@ -118,6 +121,7 @@ func TestWriteRunRecordRoundTrip(t *testing.T) {
 		Arm:     1,
 		GitSHA:  "sha",
 		Model:   "claude-haiku-4-5-20251001",
+		Config:  map[string]string{"eval_batch_size": "30"},
 		Metrics: RunMetrics{TP: 4, FP: 8, TN: 298, FN: 31, Precision: 0.3333, Recall: 0.1143},
 	}
 	if err := writeRunRecord(want); err != nil {
@@ -133,8 +137,82 @@ func TestWriteRunRecordRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("record is not valid JSON: %v", err)
 	}
-	if got != want {
+	// reflect.DeepEqual rather than ==: Config is a map, so RunRecord is no
+	// longer a comparable type.
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round-tripped record = %+v, want %+v", got, want)
+	}
+}
+
+// TestConfigForArmRecordsEachArmsConstants pins the key set each arm records.
+//
+// The key set is the thing that can actually be wrong here: an arm missing a
+// constant it reads records a config that does not describe it, and two runs
+// that differed in that constant would then group as repeats of one experiment.
+//
+// The wanted VALUES are derived from the rag constants rather than hardcoded, so
+// retuning a constant does not break this test - it is the wiring under test, not
+// the tuning. Reading the wrong constant (arm 3's pool cap wired to
+// RETRIEVAL_TOP_K, say) still fails, because the two produce different strings.
+func TestConfigForArmRecordsEachArmsConstants(t *testing.T) {
+	batch := strconv.Itoa(EVAL_BATCH_SIZE)
+
+	tests := []struct {
+		name string
+		arm  hackernews_classifier.Arm
+		want map[string]string
+	}{
+		{"arm 0 has no retrieval to configure", hackernews_classifier.ArmGeneric,
+			map[string]string{"eval_batch_size": batch}},
+		{"arm 1 injects a profile, not excerpts", hackernews_classifier.ArmInterests,
+			map[string]string{"eval_batch_size": batch}},
+		{"arm 2 retrieves one blended query", hackernews_classifier.ArmRAG,
+			map[string]string{
+				"eval_batch_size": batch,
+				"retrieval_top_k": strconv.Itoa(rag.RETRIEVAL_TOP_K),
+			}},
+		{"arm 3 retrieves per story and pools", hackernews_classifier.ArmRAGPerStory,
+			map[string]string{
+				"eval_batch_size":            batch,
+				"retrieval_top_k_per_story":  strconv.Itoa(rag.RETRIEVAL_TOP_K_PER_STORY),
+				"retrieval_similarity_floor": strconv.FormatFloat(rag.RETRIEVAL_SIMILARITY_FLOOR, 'f', -1, 64),
+				"retrieval_pool_cap":         strconv.Itoa(rag.RETRIEVAL_POOL_CAP),
+			}},
+		// Arm 4 selects candidates by rank, so RETRIEVAL_SIMILARITY_FLOOR and
+		// RETRIEVAL_TOP_K_PER_STORY must NOT appear - it never reads them.
+		{"arm 4 reranks its candidates", hackernews_classifier.ArmRerank,
+			map[string]string{
+				"eval_batch_size":             batch,
+				"rerank_candidates_per_story": strconv.Itoa(rag.RERANK_CANDIDATES_PER_STORY),
+				"rerank_candidate_floor":      strconv.FormatFloat(rag.RERANK_CANDIDATE_FLOOR, 'f', -1, 64),
+				"rerank_top_k_per_story":      strconv.Itoa(rag.RERANK_TOP_K_PER_STORY),
+				"retrieval_pool_cap":          strconv.Itoa(rag.RETRIEVAL_POOL_CAP),
+			}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := configForArm(test.arm); !reflect.DeepEqual(got, test.want) {
+				t.Errorf("configForArm(%d) = %v, want %v", test.arm, got, test.want)
+			}
+		})
+	}
+}
+
+// TestBuildRunRecordCarriesTheArmsConfig: the config has to reach the record, not
+// merely exist. Every arm has one, so unlike corpus_index_hash it is never absent
+// on a record written after issue #40.
+func TestBuildRunRecordCarriesTheArmsConfig(t *testing.T) {
+	withStubbedRecording(t, time.Now(), "sha")
+
+	record, err := buildRunRecord("run-1", hackernews_classifier.ArmRAG,
+		runArtifacts{DatasetHash: "d", CorpusIndexHash: "i"}, Metrics{})
+	if err != nil {
+		t.Fatalf("buildRunRecord returned error: %v", err)
+	}
+
+	if !reflect.DeepEqual(record.Config, configForArm(hackernews_classifier.ArmRAG)) {
+		t.Errorf("Config = %v, want the arm's config", record.Config)
 	}
 }
 
