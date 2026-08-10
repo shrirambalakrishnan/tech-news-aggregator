@@ -1,6 +1,9 @@
 package evalHarness
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"math"
 	"sort"
 )
@@ -16,10 +19,15 @@ import (
 // spread (0.343 ± 0.076), and it was computed by hand.
 //
 // Grouping is what makes the spread meaningful: two runs are repeats of the same
-// experiment only if they shared the arm, the code, the model, the rerank model,
-// the dataset and the corpus index. Any of those differing makes them two
-// experiments, and averaging across them would report a difference as if it were
-// noise.
+// experiment only if they shared the arm, the configuration, the model, the
+// rerank model, the dataset and the corpus index. Any of those differing makes
+// them two experiments, and averaging across them would report a difference as if
+// it were noise.
+//
+// "The configuration" was "the commit" until issue #40. A commit is too coarse a
+// proxy: it changes when anything at all changes, so an unrelated commit landing
+// between two runs split them into two experiments and denied the report the one
+// thing it exists to measure.
 //
 // Everything here is PURE - no I/O - for the same reason Evaluate is: the
 // statistics are the part worth unit-testing against hand-computed numbers.
@@ -35,13 +43,54 @@ import (
 // as a configuration - and are rendered as absent, not as a value, at print time.
 // Records written before the rerank model was recorded decode to "" too, so they
 // group exactly as they did before the field existed.
+//
+// ConfigFingerprint REPLACED GitSHA here in issue #40; it is not an addition.
+// Keeping the sha alongside it would leave every group split by commit exactly as
+// before, which is the bug.
 type runGroupKey struct {
-	Arm             int
-	GitSHA          string
-	Model           string
-	RerankModel     string
-	DatasetHash     string
-	CorpusIndexHash string
+	Arm               int
+	ConfigFingerprint string
+	Model             string
+	RerankModel       string
+	DatasetHash       string
+	CorpusIndexHash   string
+}
+
+// fingerprint is a record's configuration identity: what makes two runs repeats
+// of one experiment rather than two experiments.
+//
+// ⚠️ DERIVED AT READ TIME, NEVER STORED. A fingerprint written into the record
+// would pin the canonicalisation of the day it was written, so changing that
+// canonicalisation later would give two identical configs two different
+// fingerprints and split them into two groups - the very bug this replaced
+// git_sha to fix, one layer down and much harder to see. Deriving it here keeps
+// every record, old and new, on one rule.
+//
+// ⚠️ The canonical form is json.Marshal of the map, and it is canonical ONLY
+// because encoding/json sorts map keys. A hand-rolled `for k, v := range config`
+// concatenation would compile, look equivalent, and randomise - Go randomises map
+// iteration order, so the same config would hash differently between two runs of
+// eval-report and every group would dissolve.
+//
+// An ABSENT config falls back to the record's git SHA. Records written before
+// issue #40 cannot be back-filled, and defaulting them to an empty config would
+// merge them on the claim that they shared constants nobody recorded - the same
+// failure as reading an empty corpus_index_hash as "used an empty index". The
+// fallback makes them group exactly as they did before this change.
+func fingerprint(r RunRecord) string {
+	if len(r.Config) == 0 {
+		return r.GitSHA
+	}
+
+	canonical, err := json.Marshal(r.Config)
+	if err != nil {
+		// map[string]string cannot fail to marshal; falling back to the sha
+		// keeps this total rather than inventing a shared empty fingerprint.
+		return r.GitSHA
+	}
+
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:])
 }
 
 // aggregate is one metric's mean plus its spread across the group's runs.
@@ -106,12 +155,12 @@ func groupRuns(records []RunRecord) []runGroup {
 
 	for _, r := range records {
 		key := runGroupKey{
-			Arm:             r.Arm,
-			GitSHA:          r.GitSHA,
-			Model:           r.Model,
-			RerankModel:     r.RerankModel,
-			DatasetHash:     r.DatasetHash,
-			CorpusIndexHash: r.CorpusIndexHash,
+			Arm:               r.Arm,
+			ConfigFingerprint: fingerprint(r),
+			Model:             r.Model,
+			RerankModel:       r.RerankModel,
+			DatasetHash:       r.DatasetHash,
+			CorpusIndexHash:   r.CorpusIndexHash,
 		}
 		acc, seen := byKey[key]
 		if !seen {
@@ -168,8 +217,8 @@ func sortGroups(groups []runGroup) {
 		if a.Key.Arm != b.Key.Arm {
 			return a.Key.Arm < b.Key.Arm
 		}
-		if a.Key.GitSHA != b.Key.GitSHA {
-			return a.Key.GitSHA < b.Key.GitSHA
+		if a.Key.ConfigFingerprint != b.Key.ConfigFingerprint {
+			return a.Key.ConfigFingerprint < b.Key.ConfigFingerprint
 		}
 		if a.Key.Model != b.Key.Model {
 			return a.Key.Model < b.Key.Model

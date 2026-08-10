@@ -250,7 +250,7 @@ func TestRenderEvalReportPrintsBothSections(t *testing.T) {
 	out, _ := renderForTest(t)
 
 	runsAt := strings.Index(out, "=== Eval runs (2) ===")
-	groupsAt := strings.Index(out, "=== Grouped by (arm, git_sha, model, rerank_model, dataset_hash, corpus_index_hash) — 1 group ===")
+	groupsAt := strings.Index(out, "=== Grouped by (arm, config, model, rerank_model, dataset_hash, corpus_index_hash) — 1 group ===")
 	if runsAt < 0 {
 		t.Fatalf("runs section missing:\n%s", out)
 	}
@@ -268,6 +268,77 @@ func TestRenderEvalReportPrintsBothSections(t *testing.T) {
 	}
 	if !strings.Contains(out, "n=1 groups show no ±") {
 		t.Errorf("footnote missing from the report:\n%s", out)
+	}
+}
+
+// The legend is what keeps a fixed-width hash column readable. One entry per
+// distinct configuration - not per run - and a pre-config record says so rather
+// than sitting there as a config hash whose expansion went missing.
+func TestConfigLegendExpandsEachDistinctConfig(t *testing.T) {
+	first := groupableRecord("20260806T084423Z-arm-2")
+	repeat := groupableRecord("20260806T085514Z-arm-2")
+	other := groupableRecord("20260806T090525Z-arm-3")
+	other.Config = map[string]string{"eval_batch_size": "30", "retrieval_pool_cap": "20"}
+	legacy := groupableRecord("20260805T090000Z-arm-2")
+	legacy.Config = nil
+
+	entries := configLegend([]RunRecord{first, repeat, other, legacy})
+
+	if len(entries) != 3 {
+		t.Fatalf("got %d legend entries, want 3 (two configs + one pre-config): %+v", len(entries), entries)
+	}
+
+	var configs []string
+	for _, e := range entries {
+		configs = append(configs, e.Config)
+	}
+	joined := strings.Join(configs, "\n")
+
+	// Keys ascending, so two printings of one config always read the same.
+	if !strings.Contains(joined, "eval_batch_size=30 retrieval_top_k=5") {
+		t.Errorf("legend missing the arm-2 config, keys ascending:\n%s", joined)
+	}
+	if !strings.Contains(joined, "eval_batch_size=30 retrieval_pool_cap=20") {
+		t.Errorf("legend missing the second config:\n%s", joined)
+	}
+	if !strings.Contains(joined, PRE_CONFIG_NOTE) {
+		t.Errorf("a record with no config must say so, not render as an empty config:\n%s", joined)
+	}
+}
+
+// The display contract after issue #40: config identifies a configuration
+// everywhere, and git_sha survives only as per-run provenance. A group can now
+// span commits, so a sha printed beside a group would name one arbitrary member
+// as though it spoke for all of them.
+func TestRenderEvalReportShowsConfigEverywhereAndGitSHAPerRunOnly(t *testing.T) {
+	first := groupableRecord("20260806T084423Z-arm-2")
+	second := groupableRecord("20260807T204405Z-arm-2")
+	second.GitSHA = "74f5520deadbeef"
+	withStubbedRecords(t, []RunRecord{first, second}, nil)
+
+	out, _ := renderForTest(t)
+
+	runsTable := out[:strings.Index(out, "=== Grouped by")]
+	rest := out[strings.Index(out, "=== Grouped by"):]
+
+	// Output 1 keeps both shas: they are what a reader pastes into `git show`.
+	for _, sha := range []string{"1b4a0be", "74f5520"} {
+		if !strings.Contains(runsTable, sha) {
+			t.Errorf("Output 1 must still carry git_sha %q:\n%s", sha, runsTable)
+		}
+		if strings.Contains(rest, sha) {
+			t.Errorf("git_sha %q leaked into the grouped/stability output:\n%s", sha, rest)
+		}
+	}
+
+	// The two runs share a config, so they are one group despite the two shas.
+	if !strings.Contains(rest, "— 1 group ===") {
+		t.Errorf("two shas with one config should be one group:\n%s", rest)
+	}
+
+	config := shortHash(fingerprint(first), CONTENT_HASH_SHORT_LEN)
+	if !strings.Contains(runsTable, config) || !strings.Contains(rest, config) {
+		t.Errorf("the config fingerprint %q must appear in both tables:\n%s", config, out)
 	}
 }
 
@@ -425,7 +496,7 @@ func TestFormatStabilityTableAdaptsColumnsToN(t *testing.T) {
 // a blank field there reads as an empty index rather than as no index.
 func TestStabilityHeaderMarksAbsentCorpusIndex(t *testing.T) {
 	header := stabilityHeader(runGroup{
-		Key: runGroupKey{Arm: 0, GitSHA: "1b4a0bec0ffee", Model: "claude-haiku-4-5-20251001"},
+		Key: runGroupKey{Arm: 0, ConfigFingerprint: "c0nf1g1dent1ty", Model: "claude-haiku-4-5-20251001"},
 		N:   2,
 	})
 
@@ -446,7 +517,7 @@ func TestStabilityHeaderMarksAbsentCorpusIndex(t *testing.T) {
 func TestStabilityHeaderNamesTheRerankModel(t *testing.T) {
 	reranked := stabilityHeader(runGroup{
 		Key: runGroupKey{
-			Arm: 4, GitSHA: "1b4a0bec0ffee",
+			Arm: 4, ConfigFingerprint: "c0nf1g1dent1ty",
 			Model: "claude-haiku-4-5-20251001", RerankModel: "rerank-2.5-lite",
 			DatasetHash: "a59941fa34f7", CorpusIndexHash: "3daf2eee4e65",
 		},
@@ -458,7 +529,7 @@ func TestStabilityHeaderNamesTheRerankModel(t *testing.T) {
 
 	plain := stabilityHeader(runGroup{
 		Key: runGroupKey{
-			Arm: 2, GitSHA: "1b4a0bec0ffee",
+			Arm: 2, ConfigFingerprint: "c0nf1g1dent1ty",
 			Model: "claude-haiku-4-5-20251001",
 			// No RerankModel: arm 2 does not rerank.
 			DatasetHash: "a59941fa34f7", CorpusIndexHash: "3daf2eee4e65",
