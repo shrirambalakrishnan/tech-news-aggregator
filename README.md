@@ -1,7 +1,106 @@
-## Requirements
+# Tech News Aggregator
 
-- Find the trending HackerNews articles users will be interested to read
-- Update the filtered list of items every N hours
+Get top HackerNews articles filtered based on your interests!
+
+## Quickstart
+
+### Step 1 - Setup Anthropic API Key to MacOS keychain and Load in shell
+
+```bash
+security add-generic-password -U -a "$USER" -s "ANTHROPIC_API_KEY" -w "your-anthropic-key-here"
+
+export ANTHROPIC_API_KEY=$(security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w)
+```
+
+### Step 2 - Run the app
+```bash
+go run .
+```
+
+### Step 3 - Check retrieved stories
+Check `stories.md` to find the latest articles from HackerNews related to "computer science".
+
+That's it!
+
+## Setup
+
+### Setup for `Generic Prompt` Approach
+
+- This uses a [generic prompt](hackernews_classifier/claude.go#L177) related to Computer Science to fetch interesting HackerNews articles.
+
+- Refer [Quickstart](#quickstart) section for this.
+
+---
+
+### Setup for `Finding Interests from your Github Profile`
+
+- This uses your public Github Profile repositories to `find your interests`.
+- Use the above-found interests to fetch the HackerNews articles that you would be interested in.
+
+Setup `.env` in repo root
+```bash
+GITHUB_USERNAME=yourgithubusername
+```
+
+Then do the following
+```bash
+# Step 1 - Setup your Anthropic API Key in MacOS Keychain and Load in shell
+security add-generic-password -U -a "$USER" -s "ANTHROPIC_API_KEY" -w "your-anthropic-key-here"
+
+export ANTHROPIC_API_KEY=$(security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w)
+
+# Step 2 - Generate interest-profile based on Github repos
+go run . prebuild
+
+# Step 3 - Run the app
+go run . 1
+
+# Step 4 - Check stories.md file
+```
+
+---
+
+### Setup for `Finding Interests from your own data`
+
+- This uses your data to generate RAG embeddings
+- User data that can be used in this step
+  - Research papers read by the user
+  - Blogs written by the user
+  - Repositories' readme
+  - Notes written by user based on reading
+- The retrieval step uses these RAG embeddings to fetch the HackerNews articles that you would be most interested in.
+
+First, upload the data in `profile/corpus` folder
+```bash
+- Setup the contents in `profile/corpus` folder for RAG based retrieval
+- Upload the following as `txt` or `md` file
+  - whitepapers
+  - blogs
+  - readme of Github repositories
+  - notes
+```
+
+Then do the following
+```bash
+# Step 1 - Setup your Anthropic API Key in MacOS Keychain and Load in shell
+security add-generic-password -U -a "$USER" -s "ANTHROPIC_API_KEY" -w "your-anthropic-key-here"
+export ANTHROPIC_API_KEY=$(security find-generic-password -a "$USER" -s "ANTHROPIC_API_KEY" -w)
+
+# Step 2 - Setup your Voyage AI API Key in MacOS Keychain
+security add-generic-password -U -a "$USER" -s "VOYAGE_API_KEY" -w "your-voyage-key-here"
+export VOYAGE_API_KEY=$(security find-generic-password -a "$USER" -s "VOYAGE_API_KEY" -w)
+
+# Step 3 - Generate RAG embeddings
+# This generates profile/corpus_index.json
+# Important - Takes ~20 min on Voyage's free tier (3 RPM / 10K TPM); it is pacing, not hung.
+go run . embed
+
+# Step 4 - Run the app
+go run . 2
+
+# Step 5 - Check stories.md file
+```
+
 
 ## Architecture
 
